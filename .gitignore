@@ -1,0 +1,42 @@
+# Local configuration and credentials
+Config/Secrets.xcconfig
+.env
+.env.*
+!.env.example
+
+# Apple signing material
+*.cer
+*.key
+*.mobileprovision
+*.p12
+*.pem
+
+# Local recordings and exported media
+*.caf
+*.m4a
+*.mp3
+*.wav
+
+# Xcode and Swift Package Manager output
+.build/
+.swiftpm/
+DerivedData/
+build/
+*.dSYM/
+*.ipa
+*.xcresult/
+*.xcuserstate
+xcuserdata/
+
+# Generated reports and temporary authoring files
+output/
+tmp/
+
+# Supabase local development output
+supabase/.branches/
+supabase/.temp/
+
+# Editors and macOS
+.idea/
+.vscode/
+.DS_Store

@@ -6,6 +6,14 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		122F5FC2D4EB4D6C96DE2E8F /* MeetingRecordingLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F8BDBC472DF42F5A8335A45 /* MeetingRecordingLiveActivityWidget.swift */; };
+		15B3531668C14C7184ECA107 /* MeetingRecordingAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD8AC19D6CB6439782CB51BD /* MeetingRecordingAttributes.swift */; };
+		B5245AF993BB466888F598E8 /* AlignaLiveActivity.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 7E4C39C35D964742A68AFF6C /* AlignaLiveActivity.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		C0D3A1000000000000000002 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = C0D3A1000000000000000004 /* Supabase */; };
+		F1A0D1000000000000000002 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = F1A0D1000000000000000004 /* FluidAudio */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		49793E293017828A00694B68 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -21,12 +29,36 @@
 			remoteGlobalIDString = 49793E1A3017828700694B68;
 			remoteInfo = Aligna;
 		};
+		C59BF43630A444ABAF99FBEC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 49793E133017828700694B68 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8E857BC231EE4FE7B001F290;
+			remoteInfo = AlignaLiveActivity;
+		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		A385A382D8CF4DDC9C99C014 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			dstPath = "";
+			dstSubfolder = PlugIns;
+			files = (
+				B5245AF993BB466888F598E8 /* AlignaLiveActivity.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		30285080E5DD442F9005202E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		49793E1B3017828700694B68 /* Aligna.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aligna.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		49793E283017828A00694B68 /* AlignaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AlignaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		49793E323017828B00694B68 /* AlignaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AlignaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		7E4C39C35D964742A68AFF6C /* AlignaLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AlignaLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		9F8BDBC472DF42F5A8335A45 /* MeetingRecordingLiveActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingRecordingLiveActivityWidget.swift; sourceTree = "<group>"; };
+		C0D3A1000000000000000001 /* Config/Aligna.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config/Aligna.xcconfig; sourceTree = "<group>"; };
+		FD8AC19D6CB6439782CB51BD /* MeetingRecordingAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MeetingRecordingAttributes.swift; path = ../Aligna/Shared/LiveActivity/MeetingRecordingAttributes.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -51,6 +83,8 @@
 		49793E183017828700694B68 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				C0D3A1000000000000000002 /* Supabase in Frameworks */,
+				F1A0D1000000000000000002 /* FluidAudio in Frameworks */,
 			);
 		};
 		49793E253017828A00694B68 /* Frameworks */ = {
@@ -63,13 +97,20 @@
 			files = (
 			);
 		};
+		80F105B99E2A47139662DB66 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		49793E123017828700694B68 = {
 			isa = PBXGroup;
 			children = (
+				C0D3A1000000000000000001 /* Config/Aligna.xcconfig */,
 				49793E1D3017828700694B68 /* Aligna */,
+				5A435388BC664C31A6EAEAC7 /* AlignaLiveActivity */,
 				49793E2B3017828A00694B68 /* AlignaTests */,
 				49793E353017828B00694B68 /* AlignaUITests */,
 				49793E1C3017828700694B68 /* Products */,
@@ -80,10 +121,21 @@
 			isa = PBXGroup;
 			children = (
 				49793E1B3017828700694B68 /* Aligna.app */,
+				7E4C39C35D964742A68AFF6C /* AlignaLiveActivity.appex */,
 				49793E283017828A00694B68 /* AlignaTests.xctest */,
 				49793E323017828B00694B68 /* AlignaUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		5A435388BC664C31A6EAEAC7 /* AlignaLiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				9F8BDBC472DF42F5A8335A45 /* MeetingRecordingLiveActivityWidget.swift */,
+				FD8AC19D6CB6439782CB51BD /* MeetingRecordingAttributes.swift */,
+				30285080E5DD442F9005202E /* Info.plist */,
+			);
+			path = AlignaLiveActivity;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -96,13 +148,21 @@
 				49793E173017828700694B68 /* Sources */,
 				49793E183017828700694B68 /* Frameworks */,
 				49793E193017828700694B68 /* Resources */,
+				A385A382D8CF4DDC9C99C014 /* Embed App Extensions */,
 			);
 			buildRules = (
+			);
+			dependencies = (
+				2EE5E491DBEF4905ACFB687C /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				49793E1D3017828700694B68 /* Aligna */,
 			);
 			name = Aligna;
+			packageProductDependencies = (
+				C0D3A1000000000000000004 /* Supabase */,
+				F1A0D1000000000000000004 /* FluidAudio */,
+			);
 			productName = Aligna;
 			productReference = 49793E1B3017828700694B68 /* Aligna.app */;
 			productType = "com.apple.product-type.application";
@@ -149,6 +209,21 @@
 			productReference = 49793E323017828B00694B68 /* AlignaUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		8E857BC231EE4FE7B001F290 /* AlignaLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9E6CBC04B996473E988E9A7B /* Build configuration list for PBXNativeTarget "AlignaLiveActivity" */;
+			buildPhases = (
+				4A5E8219F85E4073BDE95F99 /* Sources */,
+				80F105B99E2A47139662DB66 /* Frameworks */,
+				A6C64804D3A345E8A37D3D54 /* Resources */,
+			);
+			buildRules = (
+			);
+			name = AlignaLiveActivity;
+			productName = AlignaLiveActivity;
+			productReference = 7E4C39C35D964742A68AFF6C /* AlignaLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -170,6 +245,9 @@
 						CreatedOnToolsVersion = 27.0;
 						TestTargetID = 49793E1A3017828700694B68;
 					};
+					8E857BC231EE4FE7B001F290 = {
+						CreatedOnToolsVersion = 27.0;
+					};
 				};
 			};
 			buildConfigurationList = 49793E163017828700694B68 /* Build configuration list for PBXProject "Aligna" */;
@@ -181,12 +259,17 @@
 			);
 			mainGroup = 49793E123017828700694B68;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				C0D3A1000000000000000003 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+				F1A0D1000000000000000003 /* XCRemoteSwiftPackageReference "FluidAudio" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 49793E1C3017828700694B68 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				49793E1A3017828700694B68 /* Aligna */,
+				8E857BC231EE4FE7B001F290 /* AlignaLiveActivity */,
 				49793E273017828A00694B68 /* AlignaTests */,
 				49793E313017828B00694B68 /* AlignaUITests */,
 			);
@@ -209,6 +292,11 @@
 			files = (
 			);
 		};
+		A6C64804D3A345E8A37D3D54 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -227,9 +315,21 @@
 			files = (
 			);
 		};
+		4A5E8219F85E4073BDE95F99 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+				122F5FC2D4EB4D6C96DE2E8F /* MeetingRecordingLiveActivityWidget.swift in Sources */,
+				15B3531668C14C7184ECA107 /* MeetingRecordingAttributes.swift in Sources */,
+			);
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		2EE5E491DBEF4905ACFB687C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8E857BC231EE4FE7B001F290 /* AlignaLiveActivity */;
+			targetProxy = C59BF43630A444ABAF99FBEC /* PBXContainerItemProxy */;
+		};
 		49793E2A3017828A00694B68 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 49793E1A3017828700694B68 /* Aligna */;
@@ -366,6 +466,7 @@
 		};
 		49793E3B3017828B00694B68 /* Debug configuration for PBXNativeTarget "Aligna" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = C0D3A1000000000000000001 /* Config/Aligna.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -373,12 +474,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = XBXRHH528R;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Aligna-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -398,6 +495,7 @@
 		};
 		49793E3C3017828B00694B68 /* Release configuration for PBXNativeTarget "Aligna" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = C0D3A1000000000000000001 /* Config/Aligna.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -405,12 +503,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = XBXRHH528R;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Aligna-Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -512,6 +606,62 @@
 			};
 			name = Release;
 		};
+		9CC1D5C3D0454A4D9BC97666 /* Debug configuration for PBXNativeTarget "AlignaLiveActivity" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XBXRHH528R;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AlignaLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.notjc.Aligna.LiveActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		F2C3D7B759EC4667B41AF1F0 /* Release configuration for PBXNativeTarget "AlignaLiveActivity" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = XBXRHH528R;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AlignaLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.notjc.Aligna.LiveActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -547,7 +697,47 @@
 			);
 			defaultConfigurationName = Release;
 		};
+		9E6CBC04B996473E988E9A7B /* Build configuration list for PBXNativeTarget "AlignaLiveActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9CC1D5C3D0454A4D9BC97666 /* Debug configuration for PBXNativeTarget "AlignaLiveActivity" */,
+				F2C3D7B759EC4667B41AF1F0 /* Release configuration for PBXNativeTarget "AlignaLiveActivity" */,
+			);
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		C0D3A1000000000000000003 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift.git";
+			requirement = {
+				kind = exactVersion;
+				version = 2.52.0;
+			};
+		};
+		F1A0D1000000000000000003 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.15.5;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		C0D3A1000000000000000004 /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C0D3A1000000000000000003 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+		F1A0D1000000000000000004 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F1A0D1000000000000000003 /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 49793E133017828700694B68 /* Project object */;
 	validationLevel = 1;
