@@ -1,21 +1,37 @@
 import Foundation
 
-struct DashboardViewModel {
+nonisolated struct DashboardViewModel {
     let snapshot: DashboardSnapshot
     let now: Date
     let calendar: Calendar
 
     init(
-        snapshot: DashboardSnapshot? = nil,
+        snapshot: DashboardSnapshot,
         now: Date = .now,
         calendar: Calendar = .autoupdatingCurrent
     ) {
-        self.snapshot = snapshot ?? DashboardMockData.make(
-            referenceDate: now,
-            calendar: calendar
-        )
+        self.snapshot = snapshot
         self.now = now
         self.calendar = calendar
+    }
+
+    /// Empty dashboard, for a signed-out or freshly-installed state. Shows real
+    /// empty states rather than fabricated sample content.
+    static func empty(
+        currentUser: TeamMember = TeamMember(name: ""),
+        now: Date = .now,
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> DashboardViewModel {
+        DashboardViewModel(
+            snapshot: DashboardSnapshot(
+                currentUser: currentUser,
+                meetings: [],
+                tasks: [],
+                pendingReviews: []
+            ),
+            now: now,
+            calendar: calendar
+        )
     }
 
     var greeting: String {
@@ -33,7 +49,9 @@ struct DashboardViewModel {
 
         let firstName = snapshot.currentUser.name.split(separator: " ").first.map(String.init)
             ?? snapshot.currentUser.name
-        return "\(salutation), \(firstName)"
+        return firstName.isEmpty
+            ? salutation
+            : "\(salutation), \(firstName)"
     }
 
     var upcomingMeeting: Meeting? {
@@ -52,17 +70,27 @@ struct DashboardViewModel {
         )
     }
 
+    /// Tasks with a parseable deadline inside the next week.
+    ///
+    /// Action items whose deadline is only relative wording ("next Friday") have
+    /// no comparable date and are deliberately excluded rather than guessed into
+    /// a window; they remain visible in the Tasks tab.
     var tasksDueSoon: [ProjectTask] {
         let cutoff = calendar.date(byAdding: .day, value: 7, to: now) ?? now
 
         return Array(
             snapshot.tasks
-                .filter {
-                    !$0.isCompleted
-                        && $0.dueDate >= now
-                        && $0.dueDate <= cutoff
+                .compactMap { task -> (task: ProjectTask, due: Date)? in
+                    guard let due = task.dueDate else { return nil }
+                    return (task, due)
                 }
-                .sorted { $0.dueDate < $1.dueDate }
+                .filter {
+                    !$0.task.isCompleted
+                        && $0.due >= now
+                        && $0.due <= cutoff
+                }
+                .sorted { $0.due < $1.due }
+                .map(\.task)
                 .prefix(4)
         )
     }
@@ -90,7 +118,10 @@ struct DashboardViewModel {
         ]
     }
 
-    func confidenceText(for review: MeetingReview) -> String {
-        review.confidence.formatted(.percent.precision(.fractionLength(0))) + " confidence"
+    func confidenceText(for review: MeetingReview) -> String? {
+        review.confidence.map {
+            $0.formatted(.percent.precision(.fractionLength(0)))
+                + " confidence"
+        }
     }
 }

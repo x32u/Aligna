@@ -25,7 +25,15 @@ nonisolated enum MeetingCaptureState: Equatable, Sendable {
     }
 
     var canFinish: Bool {
-        self == .recording || self == .paused
+        // `.failed` is included so an interrupted recording can still be saved.
+        // Audio captured before the failure is real and must not be strandable
+        // behind a Retry that would delete it.
+        switch self {
+        case .recording, .paused, .failed:
+            true
+        default:
+            false
+        }
     }
 }
 
@@ -117,6 +125,7 @@ nonisolated struct MeetingCaptureStateMachine: Equatable, Sendable {
              (.paused, .recording),
              (.recording, .finishing),
              (.paused, .finishing),
+             (.failed, .finishing),
              (.finishing, .finalizingTranscript),
              (.finalizingTranscript, .finalizingTranscript),
              (.finalizingTranscript, .completed),

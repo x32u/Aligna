@@ -24,10 +24,34 @@ nonisolated struct SpeakerMatcher: SpeakerMatching, Sendable {
         clusters: [SpeakerCluster],
         candidates: [CandidateVoiceProfile]
     ) -> [SpeakerMatch] {
-        guard !clusters.isEmpty else { return [] }
+        SpeakerAttributionDiagnostics.logMatchingStarted(
+            clusters: clusters.count,
+            candidates: candidates.count
+        )
+        SpeakerAttributionDiagnostics.logThresholds(
+            similarity: thresholds.minimumSimilarity,
+            separation: thresholds.minimumSeparation
+        )
+        guard !clusters.isEmpty else {
+            SpeakerAttributionDiagnostics.logMatchingSkipped(
+                reason: "no_clusters"
+            )
+            return []
+        }
         guard !candidates.isEmpty else {
+            // Cosine similarity is never computed on this path: there is nothing
+            // to compare against, so every cluster stays anonymous.
+            SpeakerAttributionDiagnostics.logMatchingSkipped(
+                reason: "no_candidates"
+            )
             return clusters.enumerated().map { index, cluster in
-                unknown(cluster, index: index)
+                let match = unknown(cluster, index: index)
+                SpeakerAttributionDiagnostics.logMatchDecision(
+                    clusterIndex: index,
+                    state: match.state.rawValue,
+                    confidence: match.confidence
+                )
+                return match
             }
         }
 
@@ -44,54 +68,87 @@ nonisolated struct SpeakerMatcher: SpeakerMatching, Sendable {
                 ) ?? -Float.infinity
             }
         }
+        for (clusterIndex, row) in scores.enumerated() {
+            for (candidateIndex, similarity) in row.enumerated() {
+                SpeakerAttributionDiagnostics.logSimilarity(
+                    clusterIndex: clusterIndex,
+                    candidateIndex: candidateIndex,
+                    similarity: similarity
+                )
+            }
+        }
         let assignment = bestOneToOneAssignment(scores: scores)
 
         return clusters.enumerated().map { clusterIndex, cluster in
-            guard let candidateIndex = assignment[clusterIndex],
-                  candidateIndex < candidates.count
-            else {
-                return unknown(
-                    cluster,
-                    index: clusterIndex,
-                    confidence: bestFiniteScore(
-                        scores[clusterIndex]
-                    )
-                )
-            }
+            let match = decide(
+                clusterIndex: clusterIndex,
+                cluster: cluster,
+                candidates: candidates,
+                scores: scores,
+                assignment: assignment
+            )
+            SpeakerAttributionDiagnostics.logMatchDecision(
+                clusterIndex: clusterIndex,
+                state: match.state.rawValue,
+                confidence: match.confidence
+            )
+            return match
+        }
+    }
 
-            let score = scores[clusterIndex][candidateIndex]
-            guard score >= thresholds.minimumSimilarity else {
-                return unknown(
-                    cluster,
-                    index: clusterIndex,
-                    confidence: score
+    /// Unchanged decision logic, extracted so the outcome can be logged once per
+    /// cluster without duplicating the branches.
+    private func decide(
+        clusterIndex: Int,
+        cluster: SpeakerCluster,
+        candidates: [CandidateVoiceProfile],
+        scores: [[Float]],
+        assignment: [Int: Int]
+    ) -> SpeakerMatch {
+        guard let candidateIndex = assignment[clusterIndex],
+              candidateIndex < candidates.count
+        else {
+            return unknown(
+                cluster,
+                index: clusterIndex,
+                confidence: bestFiniteScore(
+                    scores[clusterIndex]
                 )
-            }
+            )
+        }
 
-            let alternative = scores[clusterIndex]
-                .enumerated()
-                .filter { $0.offset != candidateIndex }
-                .map(\.element)
-                .max() ?? -Float.infinity
-            guard score - alternative >= thresholds.minimumSeparation else {
-                return SpeakerMatch(
-                    stableSpeakerKey: cluster.stableSpeakerKey,
-                    state: .ambiguous,
-                    userID: nil,
-                    displayName: "Speaker \(clusterIndex + 1)",
-                    confidence: score
-                )
-            }
-
-            let candidate = candidates[candidateIndex]
-            return SpeakerMatch(
-                stableSpeakerKey: cluster.stableSpeakerKey,
-                state: .recognized,
-                userID: candidate.userID,
-                displayName: candidate.displayName,
+        let score = scores[clusterIndex][candidateIndex]
+        guard score >= thresholds.minimumSimilarity else {
+            return unknown(
+                cluster,
+                index: clusterIndex,
                 confidence: score
             )
         }
+
+        let alternative = scores[clusterIndex]
+            .enumerated()
+            .filter { $0.offset != candidateIndex }
+            .map(\.element)
+            .max() ?? -Float.infinity
+        guard score - alternative >= thresholds.minimumSeparation else {
+            return SpeakerMatch(
+                stableSpeakerKey: cluster.stableSpeakerKey,
+                state: .ambiguous,
+                userID: nil,
+                displayName: "Speaker \(clusterIndex + 1)",
+                confidence: score
+            )
+        }
+
+        let candidate = candidates[candidateIndex]
+        return SpeakerMatch(
+            stableSpeakerKey: cluster.stableSpeakerKey,
+            state: .recognized,
+            userID: candidate.userID,
+            displayName: candidate.displayName,
+            confidence: score
+        )
     }
 
     private func unknown(

@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Supabase
 
 nonisolated struct MeetingProcessingSnapshot: Hashable, Sendable {
@@ -7,19 +8,22 @@ nonisolated struct MeetingProcessingSnapshot: Hashable, Sendable {
     let analysis: MeetingAnalysis?
     let transcript: [TranscriptSegment]
     let attributedTranscript: [AttributedTranscriptTurn]
+    let speakerAttribution: SpeakerAttributionState
 
     init(
         status: MeetingProcessingStatus,
         title: String,
         analysis: MeetingAnalysis?,
         transcript: [TranscriptSegment],
-        attributedTranscript: [AttributedTranscriptTurn] = []
+        attributedTranscript: [AttributedTranscriptTurn] = [],
+        speakerAttribution: SpeakerAttributionState = .pending
     ) {
         self.status = status
         self.title = title
         self.analysis = analysis
         self.transcript = transcript
         self.attributedTranscript = attributedTranscript
+        self.speakerAttribution = speakerAttribution
     }
 }
 
@@ -52,8 +56,7 @@ actor SupabaseMeetingProcessingService: MeetingProcessingServicing {
     private let audioPreparation: any AudioPreparing
     private let voiceEngine: any VoiceProcessing
     private let voiceProfiles: any VoiceProfileServicing
-    private let speakerMatcher: any SpeakerMatching
-    private let transcriptReconciler: any TranscriptReconciling
+    private let attributionResolver: SpeakerAttributionResolver
     private var speakerTasks: [UUID: Task<Void, Never>] = [:]
 
     init(
@@ -69,8 +72,10 @@ actor SupabaseMeetingProcessingService: MeetingProcessingServicing {
         self.audioPreparation = audioPreparation
         self.voiceEngine = voiceEngine
         self.voiceProfiles = voiceProfiles
-        self.speakerMatcher = speakerMatcher
-        self.transcriptReconciler = transcriptReconciler
+        attributionResolver = SpeakerAttributionResolver(
+            matcher: speakerMatcher,
+            reconciler: transcriptReconciler
+        )
     }
 
     func enqueue(meeting: Meeting, audioURL: URL) async throws {
@@ -206,7 +211,8 @@ actor SupabaseMeetingProcessingService: MeetingProcessingServicing {
                 """
                 title, processing_status, generated_title, summary,
                 key_points, decisions, action_items, open_questions,
-                follow_ups, languages_detected, transcript_segments
+                follow_ups, languages_detected, transcript_segments,
+                speaker_processing_status, speaker_processing_skipped
                 """
             )
             .eq("id", value: meetingID)
@@ -340,60 +346,66 @@ actor SupabaseMeetingProcessingService: MeetingProcessingServicing {
                 throw VoiceRecognitionError.noSpeech
             }
 
-            let turns: [AttributedTranscriptTurn]
-            let intervals: [DiarizationInterval]
-            let skipped: Bool
+            let meetingID = meeting.id
+            let voiceProfiles = self.voiceProfiles
+            let outcome = await attributionResolver.resolve(
+                words: words,
+                diarize: { try await diarizationTask.value },
+                candidates: {
+                    // Explicit handling: a fetch failure and a successful fetch
+                    // returning zero candidates are different facts and must not
+                    // collapse into the same empty array silently.
+                    SpeakerAttributionDiagnostics
+                        .logCandidateFetchStarted()
+                    do {
+                        let loaded = try await voiceProfiles.candidates(
+                            meetingID: meetingID
+                        )
+                        SpeakerAttributionDiagnostics
+                            .logCandidateFetchSucceeded(count: loaded.count)
+                        return loaded
+                    } catch {
+                        SpeakerAttributionDiagnostics
+                            .logCandidateFetchFailed(
+                                error: error,
+                                category: Self.candidateFailureCategory(
+                                    for: error
+                                ),
+                                httpStatus: Self.candidateHTTPStatus(
+                                    for: error
+                                )
+                            )
+                        return []
+                    }
+                },
+                report: { [weak self] status in
+                    try await self?.setSpeakerStatus(
+                        meetingID: meetingID,
+                        status: status
+                    )
+                }
+            )
 
-            do {
-                try await setSpeakerStatus(
-                    meetingID: meeting.id,
-                    status: .diarizing
-                )
-                let diarization = try await diarizationTask.value
-                try await setSpeakerStatus(
-                    meetingID: meeting.id,
-                    status: .matchingSpeakers
-                )
-                let candidates =
-                    (try? await voiceProfiles.candidates(
-                        meetingID: meeting.id
-                    )) ?? []
-                let matches = speakerMatcher.match(
-                    clusters: diarization.clusters,
-                    candidates: candidates
-                )
-                turns = transcriptReconciler.reconcile(
-                    words: words,
-                    intervals: diarization.intervals,
-                    matches: matches
-                )
-                intervals = diarization.intervals
-                skipped = false
-            } catch {
+            if outcome.state != .attributed {
                 diarizationTask.cancel()
-                turns = anonymousTurns(from: words)
-                intervals = []
-                skipped = true
-                #if DEBUG
-                print(
-                    "Speaker processing skipped:",
-                    String(describing: error)
-                )
-                #endif
             }
+            SpeakerAttributionDiagnostics.logOutcome(
+                meetingID: meeting.id,
+                outcome: outcome
+            )
 
-            guard !turns.isEmpty else {
+            guard !outcome.turns.isEmpty else {
                 throw VoiceRecognitionError.noSpeech
             }
-            try await setSpeakerStatus(
+            // Status reporting is best-effort: an Edge Function hiccup here must
+            // not discard diarization results that already succeeded.
+            try? await setSpeakerStatus(
                 meetingID: meeting.id,
                 status: .mergingTranscript
             )
             try await saveSpeakerAttribution(
                 meetingID: meeting.id,
-                intervals: intervals,
-                turns: turns,
-                skipped: skipped
+                outcome: outcome
             )
             try await requestAnalysis(meetingID: meeting.id)
         } catch {
@@ -402,12 +414,11 @@ actor SupabaseMeetingProcessingService: MeetingProcessingServicing {
                 meetingID: meeting.id,
                 status: .failed
             )
-            #if DEBUG
-            print(
-                "Speaker pipeline deferred:",
-                String(describing: error)
+            SpeakerAttributionDiagnostics.logFailure(
+                meetingID: meeting.id,
+                stage: "speaker_pipeline",
+                error: error
             )
-            #endif
         }
     }
 
@@ -446,6 +457,8 @@ actor SupabaseMeetingProcessingService: MeetingProcessingServicing {
                     meetingID: meetingID,
                     modelVersion: nil,
                     skipped: nil,
+                    speakerState: nil,
+                    failureReason: nil,
                     status: status.rawValue,
                     intervals: nil,
                     turns: nil
@@ -456,28 +469,64 @@ actor SupabaseMeetingProcessingService: MeetingProcessingServicing {
 
     private func saveSpeakerAttribution(
         meetingID: UUID,
-        intervals: [DiarizationInterval],
-        turns: [AttributedTranscriptTurn],
-        skipped: Bool
+        outcome: SpeakerAttributionOutcome
     ) async throws {
+        let attributed = outcome.state.identifiesSpeakers
         let _: SpeakerAttributionResponse = try await client.functions.invoke(
             "speaker-attribution",
             options: FunctionInvokeOptions(
                 body: SpeakerAttributionRequestDTO(
                     meetingID: meetingID,
-                    modelVersion: skipped
-                        ? nil
-                        : VoiceModelDescriptor.fluidAudioOfflineV1
-                            .modelVersion,
-                    skipped: skipped,
+                    modelVersion: attributed
+                        ? VoiceModelDescriptor.fluidAudioOfflineV1
+                            .modelVersion
+                        : nil,
+                    skipped: !attributed,
+                    speakerState: outcome.state.rawValue,
+                    failureReason: outcome.failureReason,
                     status: nil,
-                    intervals: intervals.map(
+                    intervals: outcome.intervals.map(
                         SpeakerAttributionIntervalDTO.init
                     ),
-                    turns: turns.map(SpeakerAttributionTurnDTO.init)
+                    turns: outcome.turns.map(SpeakerAttributionTurnDTO.init)
                 )
             )
         )
+    }
+
+    /// Safe category for a candidate-fetch failure. Mirrors the cases
+    /// `FunctionsError` exposes, without touching response bodies.
+    nonisolated private static func candidateFailureCategory(
+        for error: Error
+    ) -> String {
+        if let voiceError = error as? VoiceRecognitionError {
+            return "voice_\(voiceError.diagnosticCode)"
+        }
+        if let functionsError = error as? FunctionsError {
+            return switch functionsError {
+            case .relayError: "relay_error"
+            case .httpError: "http_error"
+            }
+        }
+        if let urlError = error as? URLError {
+            return "url_\(urlError.code.rawValue)"
+        }
+        if error is CancellationError {
+            return "cancelled"
+        }
+        return "unknown"
+    }
+
+    nonisolated private static func candidateHTTPStatus(
+        for error: Error
+    ) -> Int? {
+        guard let functionsError = error as? FunctionsError else {
+            return nil
+        }
+        return switch functionsError {
+        case .relayError: nil
+        case let .httpError(code, _): code
+        }
     }
 
     private func requestAnalysis(meetingID: UUID) async throws {
@@ -490,34 +539,6 @@ actor SupabaseMeetingProcessingService: MeetingProcessingServicing {
                     action: .analyze
                 )
             )
-        )
-    }
-
-    private func anonymousTurns(
-        from words: [WhisperWord]
-    ) -> [AttributedTranscriptTurn] {
-        let anonymousMatch = SpeakerMatch(
-            stableSpeakerKey: "speaker-1",
-            state: .unknown,
-            userID: nil,
-            displayName: "Speaker 1",
-            confidence: nil
-        )
-        let intervals = words.first.flatMap { first in
-            words.last.map { last in
-                [
-                    DiarizationInterval(
-                        stableSpeakerKey: "speaker-1",
-                        startSeconds: first.startSeconds,
-                        endSeconds: last.endSeconds
-                    )
-                ]
-            }
-        } ?? []
-        return transcriptReconciler.reconcile(
-            words: words,
-            intervals: intervals,
-            matches: [anonymousMatch]
         )
     }
 }
@@ -725,6 +746,8 @@ nonisolated private struct MeetingProcessingResultDTO: Decodable, Sendable {
     let followUps: [MeetingInsight]
     let languagesDetected: [String]
     let transcriptSegments: [CloudTranscriptSegmentDTO]
+    let speakerProcessingStatus: String?
+    let speakerProcessingSkipped: Bool?
 
     enum CodingKeys: String, CodingKey {
         case title
@@ -738,6 +761,8 @@ nonisolated private struct MeetingProcessingResultDTO: Decodable, Sendable {
         case followUps = "follow_ups"
         case languagesDetected = "languages_detected"
         case transcriptSegments = "transcript_segments"
+        case speakerProcessingStatus = "speaker_processing_status"
+        case speakerProcessingSkipped = "speaker_processing_skipped"
     }
 
     func domain(
@@ -762,7 +787,11 @@ nonisolated private struct MeetingProcessingResultDTO: Decodable, Sendable {
             title: generatedTitle ?? title,
             analysis: analysis,
             transcript: transcriptSegments.map(\.domain),
-            attributedTranscript: attributedTranscript
+            attributedTranscript: attributedTranscript,
+            speakerAttribution: .fromProcessingStatus(
+                speakerProcessingStatus,
+                skipped: speakerProcessingSkipped ?? false
+            )
         )
     }
 }
@@ -813,6 +842,8 @@ nonisolated private struct SpeakerAttributionRequestDTO:
     let meetingID: UUID
     let modelVersion: String?
     let skipped: Bool?
+    let speakerState: String?
+    let failureReason: String?
     let status: String?
     let intervals: [SpeakerAttributionIntervalDTO]?
     let turns: [SpeakerAttributionTurnDTO]?
@@ -821,6 +852,8 @@ nonisolated private struct SpeakerAttributionRequestDTO:
         case meetingID = "meeting_id"
         case modelVersion = "model_version"
         case skipped
+        case speakerState = "speaker_state"
+        case failureReason = "failure_reason"
         case status
         case intervals
         case turns

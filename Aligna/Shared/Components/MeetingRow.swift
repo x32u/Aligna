@@ -253,20 +253,38 @@ private extension View {
     }
 }
 
+private extension Meeting {
+    /// Preview fixture, local to this file so no shared sample-data type can be
+    /// reached from production code.
+    static var previewSample: Meeting {
+        Meeting(
+            title: "Launch readiness review",
+            projectName: "Aligna Mobile Launch",
+            scheduledAt: Date(timeIntervalSince1970: 1_800_000_000),
+            durationSeconds: 38 * 60,
+            participants: [
+                TeamMember(name: "Maya Chen"),
+                TeamMember(name: "Liam Rivera"),
+            ],
+            status: .needsReview
+        )
+    }
+}
+
 #Preview("Meeting row") {
-    MeetingRow(meeting: SampleData.meetings[1])
+    MeetingRow(meeting: .previewSample)
         .padding()
         .preferredColorScheme(.light)
 }
 
 #Preview("Meeting row dark") {
-    MeetingRow(meeting: SampleData.meetings[1])
+    MeetingRow(meeting: .previewSample)
         .padding()
         .preferredColorScheme(.dark)
 }
 
 #Preview("Meeting row accessibility") {
-    MeetingRow(meeting: SampleData.meetings[1])
+    MeetingRow(meeting: .previewSample)
         .padding()
         .dynamicTypeSize(.accessibility2)
 }

@@ -86,7 +86,6 @@ nonisolated enum EnrollmentSampleIssue:
     case noisy
     case multipleSpeakers
     case interrupted
-
     var message: String {
         switch self {
         case .insufficientSpeech:
@@ -275,6 +274,22 @@ nonisolated enum VoiceRecognitionError:
             "Connect to the internet to finish setting up voice recognition."
         case .interrupted:
             "Voice processing was interrupted. Your meeting recording is still safe."
+        }
+    }
+
+    /// Stable, non-localized code for diagnostics. Kept separate from
+    /// `errorDescription` so log analysis never depends on user-facing copy.
+    var diagnosticCode: String {
+        switch self {
+        case .modelUnavailable: "model_unavailable"
+        case .noSpeech: "no_speech"
+        case .multipleSpeakers: "multiple_speakers"
+        case .incompatibleModel: "incompatible_model"
+        case .invalidEmbedding: "invalid_embedding"
+        case .unauthorized: "unauthorized"
+        case .configurationMissing: "configuration_missing"
+        case .offline: "offline"
+        case .interrupted: "interrupted"
         }
     }
 }

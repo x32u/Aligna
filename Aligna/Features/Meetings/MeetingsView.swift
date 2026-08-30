@@ -15,9 +15,11 @@ struct MeetingsView: View {
         meetingContext: MeetingCreationContext? = nil,
         captureDependencies: MeetingCaptureDependencies? = nil
     ) {
+        // No seeded sample meetings: an empty library must show the real empty
+        // state rather than fabricated history.
         self.library = library ?? MeetingLibrary(
             repository: InMemoryMeetingRepository(),
-            seedMeetings: SampleData.meetings
+            seedMeetings: []
         )
         self.meetingContext = meetingContext
         self.captureDependencies = captureDependencies ?? .app(

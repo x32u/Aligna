@@ -30,28 +30,86 @@ nonisolated enum VoiceVectorMath {
         }
     }
 
+    /// Outcome of aggregating enrollment samples, carrying the per-sample
+    /// similarities so a rejection can be explained without logging vectors.
+    struct AggregationOutcome: Sendable {
+        let aggregate: [Float]?
+        let inputCount: Int
+        let validCount: Int
+        /// Cosine similarity of each valid sample to the computed centroid, in
+        /// input order.
+        let similarities: [Float]
+        let survivorCount: Int
+        let minimumSamples: Int
+        let outlierDistance: Float
+    }
+
     static func aggregateEnrollment(
         _ embeddings: [[Float]],
         minimumSamples: Int = 3,
         maximumOutlierDistance: Float = 0.24
     ) -> [Float]? {
+        aggregateEnrollmentDetailed(
+            embeddings,
+            minimumSamples: minimumSamples,
+            maximumOutlierDistance: maximumOutlierDistance
+        ).aggregate
+    }
+
+    /// Identical logic to `aggregateEnrollment`, additionally reporting why the
+    /// result came out the way it did. `aggregateEnrollment` delegates here so
+    /// the two can never diverge.
+    static func aggregateEnrollmentDetailed(
+        _ embeddings: [[Float]],
+        minimumSamples: Int = 3,
+        maximumOutlierDistance: Float = 0.24
+    ) -> AggregationOutcome {
         let valid = embeddings.compactMap(normalized)
         guard valid.count >= minimumSamples,
               let dimension = valid.first?.count,
               valid.allSatisfy({ $0.count == dimension })
         else {
-            return nil
+            return AggregationOutcome(
+                aggregate: nil,
+                inputCount: embeddings.count,
+                validCount: valid.count,
+                similarities: [],
+                survivorCount: 0,
+                minimumSamples: minimumSamples,
+                outlierDistance: maximumOutlierDistance
+            )
         }
 
         let centroid = normalized(mean(valid)) ?? []
+        let similarities = valid.map {
+            cosineSimilarity($0, centroid) ?? -Float.infinity
+        }
         let retained = valid.filter {
             guard let similarity = cosineSimilarity($0, centroid) else {
                 return false
             }
             return 1 - similarity <= maximumOutlierDistance
         }
-        guard retained.count >= minimumSamples else { return nil }
-        return normalized(mean(retained))
+        guard retained.count >= minimumSamples else {
+            return AggregationOutcome(
+                aggregate: nil,
+                inputCount: embeddings.count,
+                validCount: valid.count,
+                similarities: similarities,
+                survivorCount: retained.count,
+                minimumSamples: minimumSamples,
+                outlierDistance: maximumOutlierDistance
+            )
+        }
+        return AggregationOutcome(
+            aggregate: normalized(mean(retained)),
+            inputCount: embeddings.count,
+            validCount: valid.count,
+            similarities: similarities,
+            survivorCount: retained.count,
+            minimumSamples: minimumSamples,
+            outlierDistance: maximumOutlierDistance
+        )
     }
 
     private static func mean(_ vectors: [[Float]]) -> [Float] {

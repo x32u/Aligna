@@ -21,10 +21,55 @@ actor SupabaseVoiceProfileService: VoiceProfileServicing {
               let normalized = VoiceVectorMath.normalized(embedding.values),
               normalized.count == embedding.model.embeddingDimension
         else {
+            VoiceEnrollmentDiagnostics.logRejection(
+                reason: .embeddingInvalid,
+                stage: "enroll_precondition"
+            )
             throw VoiceRecognitionError.invalidEmbedding
         }
-        let userID = try await requireVerifiedUser()
-        try await localStore.save(embedding, userID: userID)
+        let userID: UUID
+        do {
+            userID = try await requireVerifiedUser()
+        } catch {
+            VoiceEnrollmentDiagnostics.logCaughtError(
+                stage: "enroll_require_verified_user",
+                error: error
+            )
+            VoiceEnrollmentDiagnostics.logStorageResult(
+                succeeded: false,
+                reason: VoiceEnrollmentReason.from(error),
+                category: "authentication",
+                httpStatus: nil,
+                associatedWithExpectedUser: "unknown"
+            )
+            throw error
+        }
+
+        VoiceEnrollmentDiagnostics.logStorageAttempt(
+            embeddingDimension: normalized.count,
+            modelVersion: embedding.model.modelVersion
+        )
+
+        do {
+            try await localStore.save(embedding, userID: userID)
+        } catch {
+            VoiceEnrollmentDiagnostics.logCaughtError(
+                stage: "enroll_local_store",
+                error: error
+            )
+            VoiceEnrollmentDiagnostics.logStorageResult(
+                succeeded: false,
+                reason: .storageFailed,
+                category: "local_store",
+                httpStatus: nil,
+                associatedWithExpectedUser:
+                    VoiceEnrollmentDiagnostics.userAssociation(
+                        expected: userID,
+                        associated: userID
+                    )
+            )
+            throw error
+        }
 
         do {
             let _: VoiceProfileMutationResponse = try await client.functions
@@ -45,9 +90,58 @@ actor SupabaseVoiceProfileService: VoiceProfileServicing {
                         )
                     )
                 )
+            VoiceEnrollmentDiagnostics.logStorageResult(
+                succeeded: true,
+                reason: nil,
+                category: "edge_function",
+                httpStatus: 200,
+                associatedWithExpectedUser:
+                    VoiceEnrollmentDiagnostics.userAssociation(
+                        expected: userID,
+                        associated: userID
+                    )
+            )
         } catch {
+            VoiceEnrollmentDiagnostics.logCaughtError(
+                stage: "enroll_edge_function",
+                error: error
+            )
+            let normalizedError = normalizedFunctionError(error)
+            VoiceEnrollmentDiagnostics.logStorageResult(
+                succeeded: false,
+                reason: VoiceEnrollmentReason.from(normalizedError),
+                category: Self.transportCategory(for: error),
+                httpStatus: Self.httpStatus(for: error),
+                associatedWithExpectedUser:
+                    VoiceEnrollmentDiagnostics.userAssociation(
+                        expected: userID,
+                        associated: nil
+                    )
+            )
             try? await localStore.delete(userID: userID)
-            throw normalizedFunctionError(error)
+            throw normalizedError
+        }
+    }
+
+    /// Transport category for diagnostics, derived from the same `FunctionsError`
+    /// cases `normalizedFunctionError` inspects.
+    private static func transportCategory(for error: Error) -> String {
+        guard let functionsError = error as? FunctionsError else {
+            return "unknown"
+        }
+        return switch functionsError {
+        case .relayError: "relay_error"
+        case .httpError: "http_error"
+        }
+    }
+
+    private static func httpStatus(for error: Error) -> Int? {
+        guard let functionsError = error as? FunctionsError else {
+            return nil
+        }
+        return switch functionsError {
+        case .relayError: nil
+        case let .httpError(code, _): code
         }
     }
 
@@ -79,23 +173,54 @@ actor SupabaseVoiceProfileService: VoiceProfileServicing {
                 )
             )
 
-        return response.candidates.compactMap { candidate in
+        let expected = VoiceModelDescriptor.fluidAudioOfflineV1
+        var afterCompatibilityKey = 0
+        var afterNormalization = 0
+        var afterDimension = 0
+
+        let candidates = response.candidates.compactMap {
+            candidate -> CandidateVoiceProfile? in
             let model = VoiceModelDescriptor(
                 provider: candidate.modelProvider,
                 packageVersion: candidate.packageVersion,
                 modelVersion: candidate.modelVersion,
                 embeddingDimension: candidate.embeddingDimension
             )
-            guard model.compatibilityKey
-                    == VoiceModelDescriptor.fluidAudioOfflineV1
-                        .compatibilityKey,
-                  let normalized = VoiceVectorMath.normalized(
-                      candidate.embedding
-                  ),
-                  normalized.count == model.embeddingDimension
-            else {
+            guard model.compatibilityKey == expected.compatibilityKey else {
+                SpeakerAttributionDiagnostics.logCandidateRejected(
+                    provider: candidate.modelProvider,
+                    modelVersion: candidate.modelVersion,
+                    dimension: candidate.embeddingDimension,
+                    reason: "compatibility_key_mismatch"
+                )
                 return nil
             }
+            afterCompatibilityKey += 1
+
+            guard let normalized = VoiceVectorMath.normalized(
+                candidate.embedding
+            ) else {
+                SpeakerAttributionDiagnostics.logCandidateRejected(
+                    provider: candidate.modelProvider,
+                    modelVersion: candidate.modelVersion,
+                    dimension: candidate.embeddingDimension,
+                    reason: "normalization_failed"
+                )
+                return nil
+            }
+            afterNormalization += 1
+
+            guard normalized.count == model.embeddingDimension else {
+                SpeakerAttributionDiagnostics.logCandidateRejected(
+                    provider: candidate.modelProvider,
+                    modelVersion: candidate.modelVersion,
+                    dimension: normalized.count,
+                    reason: "dimension_mismatch"
+                )
+                return nil
+            }
+            afterDimension += 1
+
             return CandidateVoiceProfile(
                 userID: candidate.userID,
                 displayName: candidate.displayName,
@@ -106,6 +231,19 @@ actor SupabaseVoiceProfileService: VoiceProfileServicing {
                 )
             )
         }
+
+        SpeakerAttributionDiagnostics.logCandidateRetrievalStages(
+            serverReturned: response.candidates.count,
+            afterCompatibilityKeyFilter: afterCompatibilityKey,
+            afterNormalizationFilter: afterNormalization,
+            afterDimensionFilter: afterDimension,
+            finalCandidates: candidates.count,
+            expectedProvider: expected.provider,
+            expectedModelVersion: expected.modelVersion,
+            expectedDimension: expected.embeddingDimension
+        )
+
+        return candidates
     }
 
     func updateStatus(_ status: VoiceEnrollmentStatus) async throws {

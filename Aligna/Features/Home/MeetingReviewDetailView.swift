@@ -2,7 +2,9 @@ import SwiftUI
 
 struct MeetingReviewDetailView: View {
     let review: MeetingReview
-    let confidenceText: String
+    /// `nil` when the analyzer reported no assignment confidence. Absent
+    /// confidence is shown as absent rather than as an invented score.
+    let confidenceText: String?
 
     var body: some View {
         ScrollView {
@@ -16,10 +18,12 @@ struct MeetingReviewDetailView: View {
 
                     Spacer()
 
-                    StatusBadge(
-                        title: confidenceText,
-                        tone: .accent
-                    )
+                    if let confidenceText {
+                        StatusBadge(
+                            title: confidenceText,
+                            tone: .accent
+                        )
+                    }
                 }
 
                 AlignaCard {
@@ -77,7 +81,12 @@ struct MeetingReviewDetailView: View {
 }
 
 #Preview("Review detail") {
-    let review = DashboardMockData.make().pendingReviews[0]
+    let review = MeetingReview(
+        meetingTitle: "Launch readiness review",
+        summary: "The team aligned on beta scope and identified two launch risks that still need owners.",
+        actionItemCount: 5,
+        confidence: 0.92
+    )
 
     NavigationStack {
         MeetingReviewDetailView(

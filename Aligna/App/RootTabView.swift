@@ -7,8 +7,29 @@ struct RootTabView: View {
 
     private let session: AppSession?
     private let meetingContext: MeetingCreationContext?
-    private let dashboardViewModel: DashboardViewModel
     private let captureDependencies: MeetingCaptureDependencies
+
+    /// Live dashboard, projected from whatever meetings are currently loaded.
+    /// Recomputed on each render so a meeting finishing processing updates the
+    /// dashboard without a separate refresh path.
+    private var dashboardViewModel: DashboardViewModel {
+        DashboardViewModel(
+            snapshot: DashboardProjection.snapshot(
+                meetings: meetingLibrary.meetings,
+                currentUser: currentUser
+            )
+        )
+    }
+
+    private var currentUser: TeamMember {
+        session?.profile.map {
+            TeamMember(
+                name: $0.displayName,
+                userID: $0.id,
+                handle: $0.handle
+            )
+        } ?? TeamMember(name: "")
+    }
 
     init(session: AppSession? = nil) {
         self.session = session
@@ -48,27 +69,9 @@ struct RootTabView: View {
         _meetingLibrary = State(
             initialValue: MeetingLibrary(
                 repository: repository,
-                seedMeetings: session == nil ? nil : []
+                seedMeetings: []
             )
         )
-
-        let mock = DashboardMockData.make()
-        if let profile = session?.profile {
-            dashboardViewModel = DashboardViewModel(
-                snapshot: DashboardSnapshot(
-                    currentUser: TeamMember(
-                        name: profile.displayName,
-                        userID: profile.id,
-                        handle: profile.handle
-                    ),
-                    meetings: mock.meetings,
-                    tasks: mock.tasks,
-                    pendingReviews: mock.pendingReviews
-                )
-            )
-        } else {
-            dashboardViewModel = DashboardViewModel(snapshot: mock)
-        }
     }
 
     var body: some View {
@@ -99,7 +102,7 @@ struct RootTabView: View {
             .tag(RootTab.meetings)
 
             NavigationStack {
-                TasksView()
+                TasksView(library: meetingLibrary)
             }
             .tabItem {
                 Label(RootTab.tasks.title, systemImage: RootTab.tasks.symbol)

@@ -22,6 +22,11 @@ nonisolated struct TranscriptionRequest: Hashable, Sendable {
     }
 }
 
+/// Live streaming transcription seam.
+///
+/// No production conformance ships: the product transcribes after the meeting
+/// via Groq Whisper rather than live on-device. `MockSpeechTranscriptionService`
+/// keeps the capture flow's plumbing compilable and testable.
 protocol SpeechTranscribing: Sendable {
     func prepare(
         request: TranscriptionRequest,
@@ -34,6 +39,8 @@ protocol SpeechTranscribing: Sendable {
     func cancel() async
 }
 
+/// Post-meeting on-device transcription seam. Currently only
+/// `MockFinalTranscriptionService` conforms — see that type for why.
 protocol FinalTranscriptionServicing: Sendable {
     func transcribe(
         audioURL: URL,
@@ -41,16 +48,6 @@ protocol FinalTranscriptionServicing: Sendable {
         request: TranscriptionRequest,
         progress: @escaping @Sendable (Double?) -> Void
     ) async throws -> TranscriptVersion
-
-    func cancel() async
-}
-
-protocol TranscriptionAssetManaging: Sendable {
-    func prepareAssets(
-        for request: TranscriptionRequest,
-        pass: TranscriptionPass,
-        progress: @escaping @Sendable (Double?) -> Void
-    ) async throws
 
     func cancel() async
 }

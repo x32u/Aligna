@@ -130,9 +130,18 @@ final class MeetingCaptureViewModel {
         guard state.canResume else { return }
         do {
             try await audio.resume()
+            // Trust the recorder, not the call's return value. If the session
+            // came back unusable, staying in `.paused` with a dead recorder is
+            // what made the timer look frozen while the UI said "Recording".
+            guard audio.isActivelyRecording else {
+                throw MeetingCaptureError.recordingInterrupted
+            }
             let resumeDate = now()
             durationTracker.resume(at: resumeDate)
             transition(to: .recording)
+            // The ticker is restarted rather than assumed alive: an earlier
+            // failure path may have cancelled it.
+            startTimer()
             announce("Recording resumed")
             await liveActivity.update(
                 phase: .recording,
@@ -140,9 +149,9 @@ final class MeetingCaptureViewModel {
                 at: resumeDate
             )
         } catch let captureError as MeetingCaptureError {
-            await failAndCleanUp(captureError)
+            await failPreservingRecording(captureError)
         } catch {
-            await failAndCleanUp(.audioSessionFailed)
+            await failPreservingRecording(.audioSessionFailed)
         }
     }
 
@@ -253,12 +262,33 @@ final class MeetingCaptureViewModel {
                 case let .level(level):
                     presentAudioLevel(level)
                 case .interruptionBegan:
-                    if state == .recording {
+                    // The recorder has already paused itself. Mirror that in
+                    // the UI from any active state, not just `.recording` —
+                    // swallowing it left the UI claiming to record while no
+                    // audio was being captured.
+                    if state == .recording || state == .ready {
                         durationTracker.pause(at: now())
                         updateElapsedTime()
                         audioLevels = audioLevelHistory.settle()
                         transition(to: .paused)
                         announce("Recording interrupted and paused")
+                    }
+                case let .interruptionEnded(canResume):
+                    // The system finished with the audio session. Resuming is
+                    // still an explicit user action, but a session that cannot
+                    // be resumed must surface as a failure rather than leaving
+                    // a Resume button that can never work.
+                    if !canResume, state == .paused {
+                        fail(.recordingInterrupted, cleanUp: false)
+                    }
+                case .recordingStopped:
+                    // Media services reset: the recorder is unusable. Never
+                    // keep presenting a resumable pause.
+                    if state == .recording || state == .paused {
+                        durationTracker.pause(at: now())
+                        updateElapsedTime()
+                        audioLevels = audioLevelHistory.settle()
+                        fail(.recordingInterrupted, cleanUp: false)
                     }
                 case .routeChanged:
                     break
@@ -319,6 +349,28 @@ final class MeetingCaptureViewModel {
         await audio.cancel()
         await liveActivity.end(
             phase: .failed,
+            elapsedTime: elapsedTime,
+            at: now()
+        )
+    }
+
+    /// Fails without discarding the audio captured so far.
+    ///
+    /// A resume that cannot restart the session should not destroy what was
+    /// already recorded — the user can still press Finish and keep it. Only the
+    /// level ticker stops; the recorder is left alone so `stop()` can close the
+    /// file.
+    private func failPreservingRecording(
+        _ error: MeetingCaptureError
+    ) async {
+        durationTracker.pause(at: now())
+        updateElapsedTime()
+        audioLevels = audioLevelHistory.settle()
+        timerTask?.cancel()
+        timerTask = nil
+        fail(error, cleanUp: false)
+        await liveActivity.update(
+            phase: .paused,
             elapsedTime: elapsedTime,
             at: now()
         )

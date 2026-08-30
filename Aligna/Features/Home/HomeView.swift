@@ -12,7 +12,7 @@ struct HomeView: View {
     private let captureDependencies: MeetingCaptureDependencies
 
     init(
-        viewModel: DashboardViewModel = DashboardViewModel(),
+        viewModel: DashboardViewModel = .empty(),
         meetingLibrary: MeetingLibrary? = nil,
         meetingContext: MeetingCreationContext? = nil,
         captureDependencies: MeetingCaptureDependencies? = nil
@@ -312,10 +312,13 @@ struct HomeView: View {
 
                                 Spacer()
 
-                                StatusBadge(
-                                    title: viewModel.confidenceText(for: review),
-                                    tone: .accent
-                                )
+                                if let confidence = viewModel
+                                    .confidenceText(for: review) {
+                                    StatusBadge(
+                                        title: confidence,
+                                        tone: .accent
+                                    )
+                                }
                             }
                             .font(.caption)
                             .foregroundStyle(AlignaColors.secondaryLabel)
@@ -472,7 +475,12 @@ private struct DashboardTaskRow: View {
                     Text("•")
                         .accessibilityHidden(true)
                     Label(
-                        task.dueDate.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()),
+                        task.dueDateDescription(
+                            style: .dateTime
+                                .weekday(.abbreviated)
+                                .month(.abbreviated)
+                                .day()
+                        ),
                         systemImage: "calendar"
                     )
                 }
@@ -493,7 +501,7 @@ private struct DashboardTaskRow: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            "\(task.title), assigned to \(task.assignee), due \(task.dueDate.formatted(date: .long, time: .omitted)), \(task.isCompleted ? "completed" : "not completed")"
+            "\(task.title), assigned to \(task.assignee), due \(task.dueDateDescription(style: .dateTime.year().month(.wide).day())), \(task.isCompleted ? "completed" : "not completed")"
         )
     }
 }

@@ -1,3 +1,4 @@
+import AVFAudio
 import Foundation
 import Testing
 @testable import Aligna
@@ -1857,6 +1858,137 @@ struct AlignaTests {
     }
 
     @MainActor
+    @Test("Fractional-second dates survive a local repository round trip")
+    func localRepositoryPreservesFractionalSecondDates() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "AlignaDatePrecisionTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let userID = UUID()
+        let local = LocalMeetingRepository(
+            ownerUserID: userID,
+            directory: directory
+        )
+        // A date whose fractional part is not representable in whole seconds.
+        let scheduledAt = Date(
+            timeIntervalSinceReferenceDate: 812_345_678.828_384_2
+        )
+        let meeting = Meeting(
+            title: "Fractional precision",
+            projectName: "Aligna",
+            scheduledAt: scheduledAt,
+            durationSeconds: 65.5,
+            status: .complete,
+            ownerUserID: userID,
+            organizerUserID: userID,
+            syncState: .synced
+        )
+
+        try await local.save(meeting)
+        let fetched = try await local.fetchMeetings()
+
+        #expect(fetched == [meeting])
+        #expect(fetched.first?.scheduledAt == scheduledAt)
+        #expect(
+            fetched.first?.scheduledAt.timeIntervalSinceReferenceDate
+                == scheduledAt.timeIntervalSinceReferenceDate
+        )
+    }
+
+    @MainActor
+    @Test("Previously written ISO8601 meeting dates still decode")
+    func localRepositoryDecodesLegacyISO8601Dates() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "AlignaLegacyDateTests-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let userID = UUID()
+        let scheduledAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let meeting = Meeting(
+            title: "Legacy date",
+            projectName: "Aligna",
+            scheduledAt: scheduledAt,
+            status: .complete,
+            ownerUserID: userID,
+            organizerUserID: userID,
+            syncState: .synced
+        )
+
+        // Write the file exactly as an earlier build would have: ISO8601
+        // strings truncated to whole seconds.
+        let legacyEncoder = JSONEncoder()
+        legacyEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        legacyEncoder.dateEncodingStrategy = .iso8601
+        let userDirectory = directory.appending(
+            path: userID.uuidString.lowercased(),
+            directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(
+            at: userDirectory,
+            withIntermediateDirectories: true
+        )
+        try legacyEncoder.encode([meeting]).write(
+            to: userDirectory.appending(path: "meetings.json"),
+            options: [.atomic]
+        )
+
+        let local = LocalMeetingRepository(
+            ownerUserID: userID,
+            directory: directory
+        )
+        let fetched = try await local.fetchMeetings()
+
+        #expect(fetched.count == 1)
+        #expect(fetched.first?.title == "Legacy date")
+        // The legacy value was already whole-second, so it round-trips exactly.
+        #expect(fetched.first?.scheduledAt == scheduledAt)
+    }
+
+    @Test("Repository date coding accepts every previously written format")
+    func repositoryDateCodingAcceptsLegacyStringFormats() throws {
+        struct Wrapper: Codable, Equatable {
+            let at: Date
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy =
+            LocalMeetingRepository.DateCoding.decodingStrategy
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy =
+            LocalMeetingRepository.DateCoding.encodingStrategy
+
+        let expected = Date(timeIntervalSince1970: 1_800_000_000)
+
+        // Whole-second ISO8601, as written by `.iso8601`.
+        let wholeSeconds = try decoder.decode(
+            Wrapper.self,
+            from: Data(#"{"at":"2027-01-15T08:00:00Z"}"#.utf8)
+        )
+        #expect(wholeSeconds.at == expected)
+
+        // Fractional ISO8601, in case any payload carries milliseconds.
+        let fractional = try decoder.decode(
+            Wrapper.self,
+            from: Data(#"{"at":"2027-01-15T08:00:00.000Z"}"#.utf8)
+        )
+        #expect(fractional.at == expected)
+
+        // The current numeric form, which must be exact.
+        let precise = Date(
+            timeIntervalSinceReferenceDate: 812_345_678.828_384_2
+        )
+        let encoded = try encoder.encode(Wrapper(at: precise))
+        #expect(
+            try decoder.decode(Wrapper.self, from: encoded)
+                == Wrapper(at: precise)
+        )
+    }
+
+    @MainActor
     @Test("A failed cloud delete preserves the local meeting")
     func failedCloudDeletionPreservesLocalCopy() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(
@@ -2373,10 +2505,1119 @@ struct AlignaTests {
         )
     }
 
+    // MARK: - Speaker attribution resolution
+    //
+    // Regression coverage for the diarization failure path: a failed
+    // diarization used to be laundered into a synthetic single-speaker
+    // transcript, so every meeting looked like one person talking.
+
+    @Test("Alternating diarization clusters stay separate speakers")
+    func speakerAttributionSeparatesAlternatingClusters() async {
+        let resolver = SpeakerAttributionResolver()
+        let words = [
+            WhisperWord(text: "Hello", startSeconds: 0, endSeconds: 0.9),
+            WhisperWord(text: "there.", startSeconds: 2.1, endSeconds: 2.9),
+            WhisperWord(text: "Kumusta", startSeconds: 4.1, endSeconds: 4.9),
+            WhisperWord(text: "ka?", startSeconds: 6.1, endSeconds: 6.9),
+        ]
+        let diarization = DiarizationOutput(
+            intervals: [
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 0,
+                    endSeconds: 1
+                ),
+                DiarizationInterval(
+                    stableSpeakerKey: "S2",
+                    startSeconds: 2,
+                    endSeconds: 3
+                ),
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 4,
+                    endSeconds: 5
+                ),
+                DiarizationInterval(
+                    stableSpeakerKey: "S2",
+                    startSeconds: 6,
+                    endSeconds: 7
+                ),
+            ],
+            clusters: [
+                SpeakerCluster(
+                    stableSpeakerKey: "S1",
+                    embedding: VoiceEmbedding(
+                        values: voiceVector(first: 1, second: 0),
+                        model: .fluidAudioOfflineV1
+                    )
+                ),
+                SpeakerCluster(
+                    stableSpeakerKey: "S2",
+                    embedding: VoiceEmbedding(
+                        values: voiceVector(first: 0, second: 1),
+                        model: .fluidAudioOfflineV1
+                    )
+                ),
+            ]
+        )
+
+        let outcome = await resolver.resolve(
+            words: words,
+            diarize: { diarization },
+            candidates: { [] },
+            report: { _ in }
+        )
+
+        #expect(outcome.state == .attributed)
+        #expect(outcome.failureReason == nil)
+        #expect(outcome.turns.count == 4)
+        #expect(
+            outcome.turns.map(\.stableSpeakerKey)
+                == ["S1", "S2", "S1", "S2"]
+        )
+        // Two distinct speakers, not one collapsed label.
+        #expect(Set(outcome.turns.map(\.speakerDisplayName)).count == 2)
+        #expect(outcome.turns.map(\.text) == [
+            "Hello", "there.", "Kumusta", "ka?",
+        ])
+        #expect(outcome.turns[0].startSeconds == 0)
+        #expect(outcome.turns[3].endSeconds == 6.9)
+    }
+
+    @Test("A single diarization cluster remains a single speaker")
+    func speakerAttributionKeepsSingleClusterSingle() async {
+        let resolver = SpeakerAttributionResolver()
+        let words = [
+            WhisperWord(text: "Just", startSeconds: 0, endSeconds: 0.4),
+            WhisperWord(text: "me", startSeconds: 0.5, endSeconds: 0.9),
+            WhisperWord(text: "today.", startSeconds: 1, endSeconds: 1.6),
+        ]
+        let diarization = DiarizationOutput(
+            intervals: [
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 0,
+                    endSeconds: 2
+                ),
+            ],
+            clusters: [
+                SpeakerCluster(
+                    stableSpeakerKey: "S1",
+                    embedding: VoiceEmbedding(
+                        values: voiceVector(first: 1, second: 0),
+                        model: .fluidAudioOfflineV1
+                    )
+                ),
+            ]
+        )
+
+        let outcome = await resolver.resolve(
+            words: words,
+            diarize: { diarization },
+            candidates: { [] },
+            report: { _ in }
+        )
+
+        #expect(outcome.state == .attributed)
+        #expect(Set(outcome.turns.map(\.stableSpeakerKey)) == ["S1"])
+        #expect(outcome.turns.count == 1)
+        #expect(outcome.turns[0].text == "Just me today.")
+    }
+
+    @Test("An unmatched cluster never inherits the enrolled identity")
+    func speakerAttributionDoesNotLeakEnrolledIdentity() async {
+        let resolver = SpeakerAttributionResolver()
+        let johnID = UUID()
+        let words = [
+            WhisperWord(text: "Mine.", startSeconds: 0, endSeconds: 0.8),
+            WhisperWord(text: "Theirs.", startSeconds: 2.1, endSeconds: 2.9),
+        ]
+        let diarization = DiarizationOutput(
+            intervals: [
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 0,
+                    endSeconds: 1
+                ),
+                DiarizationInterval(
+                    stableSpeakerKey: "S2",
+                    startSeconds: 2,
+                    endSeconds: 3
+                ),
+            ],
+            clusters: [
+                SpeakerCluster(
+                    stableSpeakerKey: "S1",
+                    embedding: VoiceEmbedding(
+                        values: voiceVector(first: 1, second: 0),
+                        model: .fluidAudioOfflineV1
+                    )
+                ),
+                SpeakerCluster(
+                    stableSpeakerKey: "S2",
+                    embedding: VoiceEmbedding(
+                        values: voiceVector(first: 0, second: 1),
+                        model: .fluidAudioOfflineV1
+                    )
+                ),
+            ]
+        )
+        let onlyJohn = CandidateVoiceProfile(
+            userID: johnID,
+            displayName: "John",
+            avatarPath: nil,
+            embedding: VoiceEmbedding(
+                values: voiceVector(first: 1, second: 0),
+                model: .fluidAudioOfflineV1
+            )
+        )
+
+        let outcome = await resolver.resolve(
+            words: words,
+            diarize: { diarization },
+            candidates: { [onlyJohn] },
+            report: { _ in }
+        )
+
+        #expect(outcome.state == .attributed)
+        #expect(outcome.turns.count == 2)
+        #expect(outcome.turns[0].speakerUserID == johnID)
+        #expect(outcome.turns[0].attributionSource == .voiceProfile)
+        // The second cluster matched no profile: it must stay anonymous rather
+        // than borrowing the only enrolled identity.
+        #expect(outcome.turns[1].speakerUserID == nil)
+        #expect(outcome.turns[1].speakerDisplayName != "John")
+        #expect(outcome.turns[1].attributionSource == .anonymous)
+    }
+
+    @Test("No speech falls back to an unattributed transcript")
+    func speakerAttributionSkipsWhenThereIsNoSpeech() async {
+        let resolver = SpeakerAttributionResolver()
+        let words = [
+            WhisperWord(text: "Hmm.", startSeconds: 0, endSeconds: 0.5),
+        ]
+
+        let outcome = await resolver.resolve(
+            words: words,
+            diarize: { throw VoiceRecognitionError.noSpeech },
+            candidates: { [] },
+            report: { _ in }
+        )
+
+        #expect(outcome.state == .skipped)
+        #expect(outcome.failureReason == nil)
+        #expect(outcome.intervals.isEmpty)
+        #expect(outcome.turns.count == 1)
+        #expect(outcome.turns[0].text == "Hmm.")
+        #expect(!outcome.state.identifiesSpeakers)
+    }
+
+    @Test("An unavailable model fails without inventing a speaker")
+    func speakerAttributionFailsWithoutSyntheticSpeaker() async {
+        let resolver = SpeakerAttributionResolver()
+        let words = [
+            WhisperWord(text: "First", startSeconds: 0, endSeconds: 0.6),
+            WhisperWord(text: "second.", startSeconds: 5, endSeconds: 5.6),
+        ]
+
+        let outcome = await resolver.resolve(
+            words: words,
+            diarize: { throw VoiceRecognitionError.modelUnavailable },
+            candidates: { [] },
+            report: { _ in }
+        )
+
+        #expect(outcome.state == .failed)
+        #expect(!outcome.state.identifiesSpeakers)
+        #expect(outcome.failureReason == "voice_model_unavailable")
+        #expect(outcome.intervals.isEmpty)
+        // The transcript survives, but nothing may claim to be a numbered
+        // speaker that diarization never produced.
+        #expect(!outcome.turns.isEmpty)
+        for turn in outcome.turns {
+            #expect(
+                turn.stableSpeakerKey
+                    == SpeakerAttributionState.unattributedSpeakerKey
+            )
+            #expect(turn.speakerUserID == nil)
+            #expect(!turn.speakerDisplayName.contains("Speaker 1"))
+            #expect(!turn.speakerDisplayName.contains("Person 1"))
+        }
+        #expect(outcome.state.notice != nil)
+    }
+
+    @Test("Cancellation and transport errors are recorded distinctly")
+    func speakerAttributionRecordsFailureReasons() async {
+        let resolver = SpeakerAttributionResolver()
+        let words = [
+            WhisperWord(text: "Word", startSeconds: 0, endSeconds: 0.5),
+        ]
+
+        let interrupted = await resolver.resolve(
+            words: words,
+            diarize: { throw VoiceRecognitionError.interrupted },
+            candidates: { [] },
+            report: { _ in }
+        )
+        let offline = await resolver.resolve(
+            words: words,
+            diarize: { throw URLError(.notConnectedToInternet) },
+            candidates: { [] },
+            report: { _ in }
+        )
+
+        #expect(interrupted.state == .failed)
+        #expect(interrupted.failureReason == "voice_interrupted")
+        #expect(offline.state == .failed)
+        #expect(offline.failureReason?.hasPrefix("url_") == true)
+    }
+
+    @Test("Status reporting failures never discard diarization results")
+    func speakerAttributionSurvivesStatusReportingFailure() async {
+        let resolver = SpeakerAttributionResolver()
+        let words = [
+            WhisperWord(text: "Hello", startSeconds: 0, endSeconds: 0.9),
+            WhisperWord(text: "again.", startSeconds: 2.1, endSeconds: 2.9),
+        ]
+        let diarization = DiarizationOutput(
+            intervals: [
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 0,
+                    endSeconds: 1
+                ),
+                DiarizationInterval(
+                    stableSpeakerKey: "S2",
+                    startSeconds: 2,
+                    endSeconds: 3
+                ),
+            ],
+            clusters: [
+                SpeakerCluster(
+                    stableSpeakerKey: "S1",
+                    embedding: VoiceEmbedding(
+                        values: voiceVector(first: 1, second: 0),
+                        model: .fluidAudioOfflineV1
+                    )
+                ),
+                SpeakerCluster(
+                    stableSpeakerKey: "S2",
+                    embedding: VoiceEmbedding(
+                        values: voiceVector(first: 0, second: 1),
+                        model: .fluidAudioOfflineV1
+                    )
+                ),
+            ]
+        )
+
+        // Every status round-trip fails, as it would when the Edge Function is
+        // unreachable or the session needs refreshing.
+        let outcome = await resolver.resolve(
+            words: words,
+            diarize: { diarization },
+            candidates: { [] },
+            report: { _ in throw URLError(.timedOut) }
+        )
+
+        #expect(outcome.state == .attributed)
+        #expect(outcome.failureReason == nil)
+        #expect(outcome.turns.count == 2)
+        #expect(
+            outcome.turns.map(\.stableSpeakerKey) == ["S1", "S2"]
+        )
+        #expect(outcome.intervals.count == 2)
+    }
+
+    @Test("Speaker attribution state maps from the stored column")
+    func speakerAttributionStateMapsStoredValues() {
+        #expect(
+            SpeakerAttributionState.fromProcessingStatus(
+                "complete",
+                skipped: false
+            ) == .attributed
+        )
+        #expect(
+            SpeakerAttributionState.fromProcessingStatus(
+                "complete",
+                skipped: true
+            ) == .skipped
+        )
+        #expect(
+            SpeakerAttributionState.fromProcessingStatus(
+                "skipped",
+                skipped: true
+            ) == .skipped
+        )
+        #expect(
+            SpeakerAttributionState.fromProcessingStatus(
+                "failed",
+                skipped: true
+            ) == .failed
+        )
+        // In-flight and unknown stages must not read as a finished attribution.
+        #expect(
+            SpeakerAttributionState.fromProcessingStatus(
+                "diarizing",
+                skipped: false
+            ) == .pending
+        )
+        #expect(
+            SpeakerAttributionState.fromProcessingStatus(
+                nil,
+                skipped: false
+            ) == .pending
+        )
+        #expect(SpeakerAttributionState.attributed.notice == nil)
+        #expect(SpeakerAttributionState.pending.notice == nil)
+        #expect(SpeakerAttributionState.skipped.notice != nil)
+        #expect(SpeakerAttributionState.failed.notice != nil)
+    }
+
+    // MARK: - Recording interruption and resume
+    //
+    // Regression coverage for the real-device bug where an interruption paused
+    // capture and Resume left the UI reporting "Recording" while the recorder
+    // was stopped and the timer no longer advanced.
+
+    @MainActor
+    @Test("An interruption pauses capture and stops the elapsed timer")
+    func captureInterruptionPausesAndStopsTimer() async {
+        let audio = MockAudioRecordingService()
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_800_000_000))
+        let viewModel = MeetingCaptureViewModel(
+            configuration: captureConfiguration(),
+            dependencies: MeetingCaptureDependencies(
+                audio: audio,
+                speech: MockSpeechTranscriptionService(eventDelay: .seconds(10))
+            ),
+            repository: InMemoryMeetingRepository(),
+            now: { clock.now }
+        )
+
+        await viewModel.start()
+        #expect(viewModel.state == .recording)
+
+        clock.advance(by: 10)
+        audio.simulateInterruptionBegan()
+        await waitUntil { viewModel.state == .paused }
+
+        #expect(viewModel.state == .paused)
+        #expect(!audio.isActivelyRecording)
+        let frozen = viewModel.elapsedTime
+        // While paused, wall-clock time must not accumulate.
+        clock.advance(by: 30)
+        #expect(viewModel.elapsedTime == frozen)
+    }
+
+    @MainActor
+    @Test("Resume restarts the recorder and the elapsed timer")
+    func captureResumeRestartsRecorderAndTimer() async {
+        let audio = MockAudioRecordingService()
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_800_000_000))
+        let viewModel = MeetingCaptureViewModel(
+            configuration: captureConfiguration(),
+            dependencies: MeetingCaptureDependencies(
+                audio: audio,
+                speech: MockSpeechTranscriptionService(eventDelay: .seconds(10))
+            ),
+            repository: InMemoryMeetingRepository(),
+            now: { clock.now }
+        )
+
+        await viewModel.start()
+        clock.advance(by: 10)
+        await viewModel.pause()
+        #expect(viewModel.state == .paused)
+
+        clock.advance(by: 5)
+        await viewModel.resume()
+
+        #expect(viewModel.state == .recording)
+        // The recorder is genuinely capturing again, not merely reported as such.
+        #expect(audio.isActivelyRecording)
+        #expect(audio.resumeCount == 1)
+
+        // Paused time is excluded; recording time resumes accumulating.
+        let atResume = viewModel.elapsedTime
+        clock.advance(by: 7)
+        await waitUntil { viewModel.elapsedTime > atResume }
+        #expect(viewModel.elapsedTime > atResume)
+    }
+
+    @MainActor
+    @Test("A resume that silently fails never reports Recording")
+    func captureResumeFailureDoesNotClaimRecording() async {
+        let audio = MockAudioRecordingService()
+        // The session comes back but the recorder stays stopped — exactly the
+        // real-device failure where record() returns true and captures nothing.
+        audio.resumeSilentlyFails = true
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_800_000_000))
+        let viewModel = MeetingCaptureViewModel(
+            configuration: captureConfiguration(),
+            dependencies: MeetingCaptureDependencies(
+                audio: audio,
+                speech: MockSpeechTranscriptionService(eventDelay: .seconds(10))
+            ),
+            repository: InMemoryMeetingRepository(),
+            now: { clock.now }
+        )
+
+        await viewModel.start()
+        clock.advance(by: 10)
+        await viewModel.pause()
+        await viewModel.resume()
+
+        #expect(viewModel.state == .failed(.recordingInterrupted))
+        #expect(viewModel.state != .recording)
+        // The audio captured so far must survive so Finish can still save it.
+        #expect(audio.cancelCount == 0)
+        #expect(viewModel.state.canFinish)
+    }
+
+    @MainActor
+    @Test("Finish saves the meeting after a failed resume")
+    func captureFinishSucceedsAfterFailedResume() async {
+        let audio = MockAudioRecordingService()
+        audio.resumeSilentlyFails = true
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_800_000_000))
+        let viewModel = MeetingCaptureViewModel(
+            configuration: captureConfiguration(),
+            dependencies: MeetingCaptureDependencies(
+                audio: audio,
+                speech: MockSpeechTranscriptionService(eventDelay: .seconds(10))
+            ),
+            repository: InMemoryMeetingRepository(),
+            now: { clock.now }
+        )
+
+        await viewModel.start()
+        clock.advance(by: 20)
+        await viewModel.pause()
+        await viewModel.resume()
+        #expect(viewModel.state == .failed(.recordingInterrupted))
+
+        await viewModel.finish()
+
+        #expect(viewModel.state == .completed)
+        #expect(audio.stopCount == 1)
+        let saved = viewModel.savedMeeting
+        #expect(saved?.audioFileName?.hasSuffix(".m4a") == true)
+        // 20 seconds of real audio, not zero and not the paused wall clock.
+        #expect((saved?.durationSeconds ?? 0) >= 20)
+    }
+
+    @MainActor
+    @Test("An unresumable interruption fails instead of offering Resume")
+    func captureUnresumableInterruptionFails() async {
+        let audio = MockAudioRecordingService()
+        let viewModel = MeetingCaptureViewModel(
+            configuration: captureConfiguration(),
+            dependencies: MeetingCaptureDependencies(
+                audio: audio,
+                speech: MockSpeechTranscriptionService(eventDelay: .seconds(10))
+            ),
+            repository: InMemoryMeetingRepository()
+        )
+
+        await viewModel.start()
+        audio.simulateInterruptionBegan()
+        await waitUntil { viewModel.state == .paused }
+        audio.simulateInterruptionEnded(canResume: false)
+        await waitUntil { viewModel.state == .failed(.recordingInterrupted) }
+
+        #expect(viewModel.state == .failed(.recordingInterrupted))
+        // Still finishable: the audio before the interruption is real.
+        #expect(viewModel.state.canFinish)
+    }
+
+    @MainActor
+    @Test("A media services reset ends capture rather than pausing")
+    func captureMediaServicesResetEndsCapture() async {
+        let audio = MockAudioRecordingService()
+        let viewModel = MeetingCaptureViewModel(
+            configuration: captureConfiguration(),
+            dependencies: MeetingCaptureDependencies(
+                audio: audio,
+                speech: MockSpeechTranscriptionService(eventDelay: .seconds(10))
+            ),
+            repository: InMemoryMeetingRepository()
+        )
+
+        await viewModel.start()
+        audio.simulateRecordingStopped()
+        await waitUntil { viewModel.state == .failed(.recordingInterrupted) }
+
+        #expect(viewModel.state == .failed(.recordingInterrupted))
+        #expect(viewModel.state != .paused)
+        #expect(!audio.isActivelyRecording)
+    }
+
+    @MainActor
+    @Test("Retry discards the interrupted audio and starts a new recording")
+    func captureRetryStartsFreshRecording() async {
+        let audio = MockAudioRecordingService()
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_800_000_000))
+        let viewModel = MeetingCaptureViewModel(
+            configuration: captureConfiguration(),
+            dependencies: MeetingCaptureDependencies(
+                audio: audio,
+                speech: MockSpeechTranscriptionService(eventDelay: .seconds(10))
+            ),
+            repository: InMemoryMeetingRepository(),
+            now: { clock.now }
+        )
+
+        await viewModel.start()
+        clock.advance(by: 30)
+        await viewModel.pause()
+        let firstFile = audio.latestFileURL
+
+        await viewModel.retry()
+
+        #expect(viewModel.state == .recording)
+        #expect(audio.startCount == 2)
+        #expect(audio.cancelCount == 1)
+        // Retry means a genuinely new file and a reset clock, not a continuation.
+        #expect(audio.latestFileURL != firstFile)
+        #expect(viewModel.elapsedTime < 1)
+    }
+
+    @Test("Finishing is permitted from a failed state so audio is never stranded")
+    func captureStateAllowsFinishAfterFailure() {
+        #expect(MeetingCaptureState.recording.canFinish)
+        #expect(MeetingCaptureState.paused.canFinish)
+        #expect(MeetingCaptureState.failed(.recordingInterrupted).canFinish)
+        #expect(!MeetingCaptureState.idle.canFinish)
+        #expect(!MeetingCaptureState.completed.canFinish)
+        #expect(
+            MeetingCaptureStateMachine.isValidTransition(
+                from: .failed(.recordingInterrupted),
+                to: .finishing
+            )
+        )
+    }
+
+    // MARK: - Speaker turn grouping
+    //
+    // One person speaking several sentences is one speaker turn. Sentence-final
+    // punctuation used to split it, producing a column of repeated identical
+    // speaker headers.
+
+    @Test("Consecutive sentences from one speaker form a single turn")
+    func reconciliationMergesConsecutiveSameSpeakerSentences() {
+        let words = [
+            WhisperWord(text: "First", startSeconds: 0, endSeconds: 0.4),
+            WhisperWord(text: "sentence.", startSeconds: 0.5, endSeconds: 1),
+            WhisperWord(text: "Second", startSeconds: 1.4, endSeconds: 1.8),
+            WhisperWord(text: "sentence.", startSeconds: 1.9, endSeconds: 2.3),
+            WhisperWord(text: "Third", startSeconds: 2.7, endSeconds: 3.1),
+            WhisperWord(text: "one.", startSeconds: 3.2, endSeconds: 3.6),
+        ]
+        let turns = TranscriptReconciliationService().reconcile(
+            words: words,
+            intervals: [
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 0,
+                    endSeconds: 4
+                ),
+            ],
+            matches: [
+                SpeakerMatch(
+                    stableSpeakerKey: "S1",
+                    state: .unknown,
+                    userID: nil,
+                    displayName: "Speaker 1",
+                    confidence: nil
+                ),
+            ]
+        )
+
+        #expect(turns.count == 1)
+        #expect(
+            turns[0].text == "First sentence. Second sentence. Third one."
+        )
+        // Boundaries span the whole stretch of speech.
+        #expect(turns[0].startSeconds == 0)
+        #expect(turns[0].endSeconds == 3.6)
+    }
+
+    @Test("Alternating speakers stay separate turns")
+    func reconciliationKeepsAlternatingSpeakersSeparate() {
+        let words = [
+            WhisperWord(text: "Mine.", startSeconds: 0, endSeconds: 0.8),
+            WhisperWord(text: "Yours.", startSeconds: 1.1, endSeconds: 1.9),
+            WhisperWord(text: "Mine", startSeconds: 2.1, endSeconds: 2.5),
+            WhisperWord(text: "again.", startSeconds: 2.6, endSeconds: 3),
+        ]
+        let turns = TranscriptReconciliationService().reconcile(
+            words: words,
+            intervals: [
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 0,
+                    endSeconds: 1
+                ),
+                DiarizationInterval(
+                    stableSpeakerKey: "S2",
+                    startSeconds: 1,
+                    endSeconds: 2
+                ),
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 2,
+                    endSeconds: 3.5
+                ),
+            ],
+            matches: [
+                SpeakerMatch(
+                    stableSpeakerKey: "S1",
+                    state: .unknown,
+                    userID: nil,
+                    displayName: "Speaker 1",
+                    confidence: nil
+                ),
+                SpeakerMatch(
+                    stableSpeakerKey: "S2",
+                    state: .unknown,
+                    userID: nil,
+                    displayName: "Speaker 2",
+                    confidence: nil
+                ),
+            ]
+        )
+
+        // Three turns: the same speaker returning after another speaker starts
+        // a new turn, and different speakers are never merged.
+        #expect(turns.count == 3)
+        #expect(turns.map(\.stableSpeakerKey) == ["S1", "S2", "S1"])
+        #expect(turns[0].text == "Mine.")
+        #expect(turns[1].text == "Yours.")
+        #expect(turns[2].text == "Mine again.")
+        #expect(turns[2].startSeconds == 2.1)
+    }
+
+    @Test("A long silence from the same speaker starts a new turn")
+    func reconciliationSplitsSameSpeakerAcrossLongSilence() {
+        let words = [
+            WhisperWord(text: "Before", startSeconds: 0, endSeconds: 0.5),
+            WhisperWord(text: "break.", startSeconds: 0.6, endSeconds: 1),
+            // Silence longer than the turn gap: a genuine new turn.
+            WhisperWord(text: "After", startSeconds: 9, endSeconds: 9.5),
+            WhisperWord(text: "break.", startSeconds: 9.6, endSeconds: 10),
+        ]
+        let turns = TranscriptReconciliationService().reconcile(
+            words: words,
+            intervals: [
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 0,
+                    endSeconds: 11
+                ),
+            ],
+            matches: [
+                SpeakerMatch(
+                    stableSpeakerKey: "S1",
+                    state: .unknown,
+                    userID: nil,
+                    displayName: "Speaker 1",
+                    confidence: nil
+                ),
+            ]
+        )
+
+        #expect(turns.count == 2)
+        #expect(turns[0].text == "Before break.")
+        #expect(turns[1].text == "After break.")
+        #expect(turns[1].startSeconds == 9)
+    }
+
+    @Test("Merging a turn keeps the lowest attribution confidence")
+    func reconciliationPreservesConfidenceAcrossMergedTurn() {
+        let johnID = UUID()
+        let words = [
+            WhisperWord(text: "One.", startSeconds: 0, endSeconds: 0.5),
+            WhisperWord(text: "Two.", startSeconds: 0.7, endSeconds: 1.2),
+        ]
+        let turns = TranscriptReconciliationService().reconcile(
+            words: words,
+            intervals: [
+                DiarizationInterval(
+                    stableSpeakerKey: "S1",
+                    startSeconds: 0,
+                    endSeconds: 2
+                ),
+            ],
+            matches: [
+                SpeakerMatch(
+                    stableSpeakerKey: "S1",
+                    state: .recognized,
+                    userID: johnID,
+                    displayName: "John",
+                    confidence: 0.91
+                ),
+            ]
+        )
+
+        #expect(turns.count == 1)
+        #expect(turns[0].speakerUserID == johnID)
+        #expect(turns[0].attributionSource == .voiceProfile)
+        #expect(turns[0].attributionConfidence == 0.91)
+    }
+
+    // MARK: - Persistence failure visibility
+    //
+    // A failed on-disk write used to be swallowed by `try?`, so the UI updated
+    // and the change silently vanished on relaunch.
+
+    /// Repository that fails every write, to exercise the failure path.
+    @MainActor
+    private final class FailingMeetingRepository: MeetingRepository {
+        struct WriteFailure: Error {}
+
+        private(set) var saveAttempts = 0
+        var stored: [Meeting] = []
+
+        func fetchMeetings() async throws -> [Meeting] {
+            stored
+        }
+
+        @discardableResult
+        func save(_ meeting: Meeting) async throws -> Meeting {
+            saveAttempts += 1
+            throw WriteFailure()
+        }
+
+        func delete(_ meeting: Meeting) async throws {
+            stored.removeAll { $0.id == meeting.id }
+        }
+    }
+
+    @MainActor
+    @Test("A failed save surfaces a warning instead of appearing to succeed")
+    func libraryReportsPersistenceFailure() async {
+        let repository = FailingMeetingRepository()
+        let library = MeetingLibrary(repository: repository)
+        let meeting = Meeting(
+            title: "Unsaved changes",
+            projectName: "Aligna",
+            scheduledAt: Date(timeIntervalSince1970: 1_800_000_000),
+            status: .complete
+        )
+
+        #expect(library.persistenceWarning == nil)
+
+        // `save` propagates, so a caller can react rather than assume success.
+        await #expect(throws: (any Error).self) {
+            try await library.save(meeting)
+        }
+        #expect(repository.saveAttempts == 1)
+    }
+
+    @MainActor
+    @Test("Clearing the persistence warning resets it")
+    func libraryClearsPersistenceWarning() async {
+        let repository = FailingMeetingRepository()
+        let library = MeetingLibrary(repository: repository)
+
+        library.clearPersistenceWarning()
+        #expect(library.persistenceWarning == nil)
+    }
+
+    @MainActor
+    @Test("A library with no seed meetings starts genuinely empty")
+    func libraryStartsEmptyWithoutSampleData() async {
+        let library = MeetingLibrary(
+            repository: InMemoryMeetingRepository()
+        )
+
+        // Previously this defaulted to fabricated `SampleData.meetings`.
+        #expect(library.meetings.isEmpty)
+        await library.load()
+        #expect(library.meetings.isEmpty)
+    }
+
+    // MARK: - Dashboard projection
+    //
+    // The dashboard, Tasks tab, and Meetings list previously rendered
+    // `DashboardMockData` — invented meetings, tasks, and confidence scores.
+
+    @Test("Tasks are projected from real meeting analysis")
+    func dashboardProjectsTasksFromAnalysis() {
+        let meeting = meetingWithAnalysis(
+            actionItems: [
+                MeetingActionItem(
+                    task: "Send the revised scope",
+                    assignee: "Maya",
+                    assigneeDisplayName: "Maya Chen",
+                    assignmentConfidence: 0.9,
+                    dueDate: "2027-01-15",
+                    evidence: MeetingEvidence(
+                        timestampSeconds: 12,
+                        quote: "I'll send the revised scope."
+                    )
+                ),
+                MeetingActionItem(
+                    task: "Follow up with the vendor",
+                    assignee: nil,
+                    dueDate: nil,
+                    evidence: MeetingEvidence(
+                        timestampSeconds: 40,
+                        quote: "Someone should follow up."
+                    )
+                ),
+            ]
+        )
+
+        let tasks = DashboardProjection.tasks(from: [meeting])
+
+        #expect(tasks.count == 2)
+        // Dated task sorts ahead of the undated one.
+        #expect(tasks[0].title == "Send the revised scope")
+        #expect(tasks[0].assignee == "Maya Chen")
+        #expect(tasks[0].dueDate != nil)
+        #expect(tasks[0].priority == .high)
+        #expect(tasks[0].sourceMeetingID == meeting.id)
+
+        #expect(tasks[1].title == "Follow up with the vendor")
+        #expect(tasks[1].assignee == "Unassigned")
+        #expect(tasks[1].dueDate == nil)
+        #expect(tasks[1].priority == .low)
+    }
+
+    @Test("Meetings without analysis contribute no tasks")
+    func dashboardProjectsNoTasksWithoutAnalysis() {
+        let meeting = Meeting(
+            title: "Still processing",
+            projectName: "Aligna",
+            scheduledAt: Date(timeIntervalSince1970: 1_800_000_000),
+            status: .processing
+        )
+
+        #expect(DashboardProjection.tasks(from: [meeting]).isEmpty)
+        #expect(DashboardProjection.pendingReviews(from: [meeting]).isEmpty)
+    }
+
+    @Test("Relative deadlines are preserved verbatim, never guessed")
+    func dashboardKeepsRelativeDeadlinesAsText() {
+        let meeting = meetingWithAnalysis(
+            actionItems: [
+                MeetingActionItem(
+                    task: "Ship the beta",
+                    assignee: "Liam",
+                    dueDate: "next Friday",
+                    evidence: MeetingEvidence(
+                        timestampSeconds: 5,
+                        quote: "Let's ship the beta next Friday."
+                    )
+                ),
+            ]
+        )
+
+        let task = DashboardProjection.tasks(from: [meeting])[0]
+
+        // "next Friday" is not a calendar date: resolving it would invent a
+        // deadline nobody agreed to.
+        #expect(task.dueDate == nil)
+        #expect(task.dueDateText == "next Friday")
+        #expect(task.dueDateDescription() == "next Friday")
+        #expect(!task.isOverdue())
+        #expect(DashboardProjection.parsedDueDate("next Friday") == nil)
+        #expect(DashboardProjection.parsedDueDate("2027-01-15") != nil)
+    }
+
+    @Test("A task with no deadline reports its absence")
+    func dashboardTaskWithoutDeadlineDescribesAbsence() {
+        let task = ProjectTask(
+            title: "Unscheduled",
+            assignee: "Unassigned",
+            dueDate: nil,
+            priority: .low
+        )
+
+        #expect(task.dueDateDescription() == "No deadline")
+        #expect(!task.isOverdue())
+    }
+
+    @Test("Pending reviews come only from meetings awaiting review")
+    func dashboardProjectsPendingReviews() {
+        let awaiting = meetingWithAnalysis(
+            status: .needsReview,
+            summary: "Scope agreed, two risks still unowned."
+        )
+        let complete = meetingWithAnalysis(status: .complete)
+
+        let reviews = DashboardProjection.pendingReviews(
+            from: [awaiting, complete]
+        )
+
+        #expect(reviews.count == 1)
+        #expect(reviews[0].summary == "Scope agreed, two risks still unowned.")
+        #expect(reviews[0].sourceMeetingID == awaiting.id)
+    }
+
+    @Test("Review confidence is absent rather than invented")
+    func dashboardReviewConfidenceIsOptional() {
+        let withoutConfidence = meetingWithAnalysis(
+            status: .needsReview,
+            actionItems: [
+                MeetingActionItem(
+                    task: "No confidence reported",
+                    assignee: nil,
+                    assignmentConfidence: nil,
+                    dueDate: nil,
+                    evidence: MeetingEvidence(
+                        timestampSeconds: 1,
+                        quote: "Quote."
+                    )
+                ),
+            ]
+        )
+
+        let review = DashboardProjection.pendingReviews(
+            from: [withoutConfidence]
+        )[0]
+        #expect(review.confidence == nil)
+
+        let viewModel = DashboardViewModel(
+            snapshot: DashboardProjection.snapshot(
+                meetings: [withoutConfidence],
+                currentUser: TeamMember(name: "JC Cruz")
+            )
+        )
+        #expect(viewModel.confidenceText(for: review) == nil)
+    }
+
+    @Test("Undated tasks are excluded from the due-soon window")
+    func dashboardDueSoonExcludesUndatedTasks() {
+        let calendar = utcCalendar()
+        let now = date(
+            year: 2027,
+            month: 1,
+            day: 10,
+            hour: 9,
+            calendar: calendar
+        )
+        let snapshot = DashboardSnapshot(
+            currentUser: TeamMember(name: "JC Cruz"),
+            meetings: [],
+            tasks: [
+                ProjectTask(
+                    title: "Dated and soon",
+                    assignee: "JC",
+                    dueDate: now.addingTimeInterval(2 * 86_400),
+                    priority: .high
+                ),
+                ProjectTask(
+                    title: "Relative wording only",
+                    assignee: "JC",
+                    dueDate: nil,
+                    dueDateText: "next Friday",
+                    priority: .medium
+                ),
+            ],
+            pendingReviews: []
+        )
+
+        let viewModel = DashboardViewModel(
+            snapshot: snapshot,
+            now: now,
+            calendar: calendar
+        )
+
+        #expect(viewModel.tasksDueSoon.count == 1)
+        #expect(viewModel.tasksDueSoon[0].title == "Dated and soon")
+    }
+
+    @Test("An empty dashboard greets without a fabricated name")
+    func dashboardEmptyStateHasNoSampleContent() {
+        let viewModel = DashboardViewModel.empty(
+            now: date(
+                year: 2027,
+                month: 1,
+                day: 10,
+                hour: 9,
+                calendar: utcCalendar()
+            ),
+            calendar: utcCalendar()
+        )
+
+        #expect(viewModel.snapshot.meetings.isEmpty)
+        #expect(viewModel.snapshot.tasks.isEmpty)
+        #expect(viewModel.snapshot.pendingReviews.isEmpty)
+        #expect(viewModel.upcomingMeeting == nil)
+        #expect(viewModel.featuredReview == nil)
+        #expect(viewModel.greeting == "Good morning")
+    }
+
+    private func meetingWithAnalysis(
+        status: Meeting.Status = .needsReview,
+        summary: String = "A summary.",
+        actionItems: [MeetingActionItem] = []
+    ) -> Meeting {
+        Meeting(
+            title: "Recorded meeting",
+            projectName: "Aligna",
+            scheduledAt: Date(timeIntervalSince1970: 1_800_000_000),
+            status: status,
+            analysis: MeetingAnalysis(
+                generatedTitle: "Generated title",
+                summary: summary,
+                keyPoints: [],
+                decisions: [],
+                actionItems: actionItems,
+                openQuestions: [],
+                followUps: [],
+                languagesDetected: ["en"]
+            )
+        )
+    }
+
+    // MARK: - Recorder settings validity
+    //
+    // Regression context: a 96 kbps AAC bitrate at 16 kHz mono made
+    // prepareToRecord() fail on device, so recording never started and the UI
+    // showed "Couldn't start recording". The fix reverts to 48 kbps (the
+    // shipped, known-good value). This is NOT unit-tested: AVAudioRecorder's
+    // prepareToRecord() depends on real audio hardware and returns false for all
+    // bitrates on the simulator, so any such assertion would test the simulator,
+    // not the encoder. Validity is confirmed by device recording and by the
+    // production guard in AudioRecordingService that surfaces a rejected
+    // configuration instead of the generic session-conflict message.
+
     private func utcCalendar() -> Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
         return calendar
+    }
+
+    /// Test clock so capture timing is deterministic instead of wall-clock based.
+    @MainActor
+    private final class MutableClock {
+        private(set) var now: Date
+
+        init(start: Date) {
+            now = start
+        }
+
+        func advance(by seconds: TimeInterval) {
+            now = now.addingTimeInterval(seconds)
+        }
+    }
+
+    /// Polls until `condition` holds, for assertions that depend on an
+    /// `AsyncStream` event being delivered.
+    @MainActor
+    private func waitUntil(
+        timeout: Duration = .seconds(2),
+        _ condition: @MainActor () -> Bool
+    ) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if condition() { return }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     private func voiceVector(

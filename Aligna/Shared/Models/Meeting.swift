@@ -28,6 +28,7 @@ nonisolated struct Meeting: Identifiable, Hashable, Codable, Sendable {
     let status: Status
     let transcript: [TranscriptSegment]
     let attributedTranscript: [AttributedTranscriptTurn]
+    let speakerAttribution: SpeakerAttributionState
     let transcriptDocument: TranscriptDocument?
     let audioFileName: String?
     let transcriptionLocaleIdentifier: String?
@@ -51,6 +52,7 @@ nonisolated struct Meeting: Identifiable, Hashable, Codable, Sendable {
         status: Status,
         transcript: [TranscriptSegment] = [],
         attributedTranscript: [AttributedTranscriptTurn] = [],
+        speakerAttribution: SpeakerAttributionState = .pending,
         transcriptDocument: TranscriptDocument? = nil,
         audioFileName: String? = nil,
         transcriptionLocaleIdentifier: String? = nil,
@@ -86,6 +88,7 @@ nonisolated struct Meeting: Identifiable, Hashable, Codable, Sendable {
         self.transcript = self.transcriptDocument?.effectiveSegments
             ?? transcript
         self.attributedTranscript = attributedTranscript
+        self.speakerAttribution = speakerAttribution
         self.audioFileName = audioFileName
         self.transcriptionLocaleIdentifier = transcriptionLocaleIdentifier
         self.ownerUserID = ownerUserID
@@ -116,6 +119,7 @@ nonisolated struct Meeting: Identifiable, Hashable, Codable, Sendable {
             status: status,
             transcript: transcript,
             attributedTranscript: attributedTranscript,
+            speakerAttribution: speakerAttribution,
             transcriptDocument: transcriptDocument,
             audioFileName: audioFileName,
             transcriptionLocaleIdentifier: transcriptionLocaleIdentifier,
@@ -142,6 +146,7 @@ nonisolated struct Meeting: Identifiable, Hashable, Codable, Sendable {
             status: status,
             transcript: document.effectiveSegments,
             attributedTranscript: attributedTranscript,
+            speakerAttribution: speakerAttribution,
             transcriptDocument: document,
             audioFileName: audioFileName,
             transcriptionLocaleIdentifier: transcriptionLocaleIdentifier,
@@ -161,7 +166,9 @@ nonisolated struct Meeting: Identifiable, Hashable, Codable, Sendable {
         analysis updatedAnalysis: MeetingAnalysis? = nil,
         transcript updatedTranscript: [TranscriptSegment]? = nil,
         attributedTranscript updatedAttributedTranscript:
-            [AttributedTranscriptTurn]? = nil
+            [AttributedTranscriptTurn]? = nil,
+        speakerAttribution updatedSpeakerAttribution:
+            SpeakerAttributionState? = nil
     ) -> Meeting {
         Meeting(
             id: id,
@@ -176,6 +183,8 @@ nonisolated struct Meeting: Identifiable, Hashable, Codable, Sendable {
             transcript: updatedTranscript ?? transcript,
             attributedTranscript:
                 updatedAttributedTranscript ?? attributedTranscript,
+            speakerAttribution:
+                updatedSpeakerAttribution ?? speakerAttribution,
             transcriptDocument: updatedTranscript == nil
                 ? transcriptDocument
                 : nil,
@@ -203,6 +212,7 @@ nonisolated struct Meeting: Identifiable, Hashable, Codable, Sendable {
         case status
         case transcript
         case attributedTranscript
+        case speakerAttribution
         case transcriptDocument
         case audioFileName
         case transcriptionLocaleIdentifier
@@ -246,6 +256,12 @@ nonisolated struct Meeting: Identifiable, Hashable, Codable, Sendable {
             [AttributedTranscriptTurn].self,
             forKey: .attributedTranscript
         ) ?? []
+        // Meetings persisted before speaker state was tracked report `pending`
+        // rather than claiming their existing labels were verified.
+        speakerAttribution = try values.decodeIfPresent(
+            SpeakerAttributionState.self,
+            forKey: .speakerAttribution
+        ) ?? .pending
         audioFileName = try values.decodeIfPresent(
             String.self,
             forKey: .audioFileName

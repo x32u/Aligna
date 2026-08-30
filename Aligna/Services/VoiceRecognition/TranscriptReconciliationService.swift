@@ -5,7 +5,7 @@ nonisolated struct TranscriptReconciliationService:
     Sendable {
     let maximumTurnGap: TimeInterval
 
-    init(maximumTurnGap: TimeInterval = 1.2) {
+    init(maximumTurnGap: TimeInterval = 2.5) {
         self.maximumTurnGap = maximumTurnGap
     }
 
@@ -19,6 +19,18 @@ nonisolated struct TranscriptReconciliationService:
                 ($0.stableSpeakerKey, $0)
             }
         )
+        // Records whether each match reaching the transcript carries a real
+        // identity or falls back to an anonymous label.
+        for match in matches {
+            SpeakerAttributionDiagnostics.logTranscriptIdentityResolution(
+                speakerKey: match.stableSpeakerKey,
+                state: match.state.rawValue,
+                labelSource: match.state == .recognized
+                    ? "identity"
+                    : "fallback",
+                hasUserID: match.userID != nil
+            )
+        }
         let attributed = words
             .sorted { $0.startSeconds < $1.startSeconds }
             .map { word in
@@ -91,6 +103,13 @@ nonisolated struct TranscriptReconciliationService:
         )
     }
 
+    /// Groups attributed words into speaker turns.
+    ///
+    /// A turn continues while the speaker is unchanged and the silence before
+    /// the next word stays within `maximumTurnGap`. Sentence-final punctuation
+    /// deliberately does NOT end a turn: one person saying three sentences is
+    /// one speaker turn, not three, and treating `.`/`!`/`?` as a boundary is
+    /// what produced repeated identical speaker headers.
     private func group(
         _ words: [AttributedWord]
     ) -> [AttributedTranscriptTurn] {
@@ -99,8 +118,7 @@ nonisolated struct TranscriptReconciliationService:
         for item in words {
             if let previous = turns.last,
                previous.stableSpeakerKey == item.stableSpeakerKey,
-               item.word.startSeconds - previous.endSeconds <= maximumTurnGap,
-               !endsTurn(previous.text) {
+               item.word.startSeconds - previous.endSeconds <= maximumTurnGap {
                 turns[turns.count - 1] = AttributedTranscriptTurn(
                     id: previous.id,
                     stableSpeakerKey: previous.stableSpeakerKey,
@@ -150,15 +168,6 @@ nonisolated struct TranscriptReconciliationService:
             return existing + word
         }
         return existing + " " + word
-    }
-
-    private func endsTurn(_ text: String) -> Bool {
-        guard let last = text.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ).last else {
-            return false
-        }
-        return ".!?".contains(last)
     }
 
     private func minimumConfidence(

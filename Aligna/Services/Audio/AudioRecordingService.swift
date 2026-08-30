@@ -1,5 +1,25 @@
 import AVFAudio
 import Foundation
+import OSLog
+
+/// Diagnostics for the meeting recorder. Records only device-independent
+/// settings values, never audio or identifiers.
+nonisolated enum RecordingDiagnostics {
+    private static let logger = Logger(
+        subsystem: "dev.notjc.Aligna",
+        category: "Recording"
+    )
+
+    static func logInvalidSettings(sampleRate: Int?, bitRate: Int?) {
+        logger.error(
+            """
+            Recorder settings rejected by prepareToRecord. \
+            sampleRate=\(sampleRate ?? -1, privacy: .public) \
+            bitRate=\(bitRate ?? -1, privacy: .public)
+            """
+        )
+    }
+}
 
 nonisolated struct AudioSample: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
@@ -8,7 +28,16 @@ nonisolated struct AudioSample: @unchecked Sendable {
 
 nonisolated enum AudioRecordingEvent: Sendable {
     case level(Float)
+    /// The system took the audio session away (call, Siri, another app) or the
+    /// input route disappeared. Capture is paused.
     case interruptionBegan
+    /// The system handed the audio session back. `canResume` mirrors
+    /// `AVAudioSession.InterruptionOptions.shouldResume`.
+    case interruptionEnded(canResume: Bool)
+    /// The recorder stopped without being asked to — an encode failure or a
+    /// media-services reset. Capture is over; the UI must not keep claiming to
+    /// be recording.
+    case recordingStopped
     case routeChanged(inputName: String?)
 }
 
@@ -26,6 +55,17 @@ protocol AudioRecording: AnyObject {
     func resume() async throws
     func stop() async throws -> URL
     func cancel() async
+
+    /// Whether the underlying recorder is actually capturing right now.
+    ///
+    /// The capture UI must be able to check this rather than trusting its own
+    /// state: after an interruption the recorder can be stopped while the view
+    /// model still believes it is paused-and-resumable.
+    var isActivelyRecording: Bool { get }
+}
+
+extension AudioRecording {
+    var isActivelyRecording: Bool { true }
 }
 
 @MainActor
@@ -43,6 +83,13 @@ final class AudioRecordingService: NSObject, AudioRecording {
     private var notificationTokens: [NSObjectProtocol] = []
     private var isRecording = false
     private var isPaused = false
+    /// True once the system has taken the session away and not yet returned it.
+    /// `resume()` must re-activate the session before recording can continue.
+    private var isInterrupted = false
+
+    var isActivelyRecording: Bool {
+        recorder?.isRecording ?? false
+    }
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -88,6 +135,12 @@ final class AudioRecordingService: NSObject, AudioRecording {
             .appending(path: UUID().uuidString.lowercased())
             .appendingPathExtension("m4a")
 
+        // 16 kHz mono is the rate FluidAudio's diarizer resamples to, so the
+        // recording is captured at the rate downstream processing wants.
+        // AAC-LC at this sample rate has a low valid bitrate ceiling — above
+        // ~48 kbps `AVAudioRecorder.prepareToRecord()` fails and recording never
+        // starts. 48 kbps is near that ceiling and proportionate to 8 kHz of
+        // Nyquist content, so it is not "thin" the way it would be at 44.1 kHz.
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 16_000,
@@ -102,7 +155,18 @@ final class AudioRecordingService: NSObject, AudioRecording {
                 settings: settings
             )
             recorder.isMeteringEnabled = true
-            recorder.prepareToRecord()
+            // `prepareToRecord()` returning false means the settings are invalid
+            // for this device/format (e.g. an out-of-range AAC bitrate), which
+            // is a programming error, not a transient session conflict. Surface
+            // it distinctly rather than letting it fall through to the generic
+            // "check other audio apps" message.
+            guard recorder.prepareToRecord() else {
+                RecordingDiagnostics.logInvalidSettings(
+                    sampleRate: settings[AVSampleRateKey] as? Int,
+                    bitRate: settings[AVEncoderBitRateKey] as? Int
+                )
+                throw MeetingCaptureError.audioSessionFailed
+            }
             guard recorder.record() else {
                 throw MeetingCaptureError.audioSessionFailed
             }
@@ -125,6 +189,7 @@ final class AudioRecordingService: NSObject, AudioRecording {
 
         isRecording = true
         isPaused = false
+        isInterrupted = false
         registerForAudioNotifications()
         startMetering()
 
@@ -148,11 +213,24 @@ final class AudioRecordingService: NSObject, AudioRecording {
             throw MeetingCaptureError.invalidAction
         }
         do {
+            // An interruption deactivates the session. Re-activating is what
+            // actually lets the recorder capture again; without it `record()`
+            // reports success while no audio reaches the file.
             try await AudioSessionController.activate()
             guard recorder.record() else {
                 throw MeetingCaptureError.audioSessionFailed
             }
+            // `record()` can return true and still leave the recorder stopped
+            // when the session is not usable. Verify with the recorder itself
+            // rather than trusting the return value.
+            guard recorder.isRecording else {
+                throw MeetingCaptureError.recordingInterrupted
+            }
             isPaused = false
+            isInterrupted = false
+            // Metering stops looping once `isRecording` flips false; after a
+            // recorder-level stop the task must be restarted.
+            startMetering()
         } catch let error as MeetingCaptureError {
             throw error
         } catch {
@@ -223,6 +301,50 @@ final class AudioRecordingService: NSObject, AudioRecording {
     private func registerForAudioNotifications() {
         let center = NotificationCenter.default
 
+        // The primary interruption signal. This was previously not observed at
+        // all, so a phone call paused capture with no way to learn the system
+        // had finished with the session.
+        notificationTokens.append(
+            center.addObserver(
+                forName: AVAudioSession.interruptionNotification,
+                object: audioSession,
+                queue: .main
+            ) { [weak self] notification in
+                let rawType = notification.userInfo?[
+                    AVAudioSessionInterruptionTypeKey
+                ] as? UInt
+                let rawOptions = notification.userInfo?[
+                    AVAudioSessionInterruptionOptionKey
+                ] as? UInt
+                Task { @MainActor [weak self] in
+                    guard let self, self.isRecording else { return }
+                    guard let rawType,
+                          let type = AVAudioSession.InterruptionType(
+                              rawValue: rawType
+                          )
+                    else {
+                        return
+                    }
+                    switch type {
+                    case .began:
+                        self.handleInterruptionBegan()
+                    case .ended:
+                        let options = AVAudioSession.InterruptionOptions(
+                            rawValue: rawOptions ?? 0
+                        )
+                        self.isInterrupted = false
+                        self.eventContinuation?.yield(
+                            .interruptionEnded(
+                                canResume: options.contains(.shouldResume)
+                            )
+                        )
+                    @unknown default:
+                        return
+                    }
+                }
+            }
+        )
+
         notificationTokens.append(
             center.addObserver(
                 forName: AVAudioSession.didBecomeInactiveNotification,
@@ -231,9 +353,25 @@ final class AudioRecordingService: NSObject, AudioRecording {
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self, self.isRecording else { return }
+                    self.handleInterruptionBegan()
+                }
+            }
+        )
+
+        // A media-services reset invalidates the recorder entirely; it cannot
+        // be resumed. Report a hard stop instead of a resumable pause.
+        notificationTokens.append(
+            center.addObserver(
+                forName: AVAudioSession.mediaServicesWereResetNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isRecording else { return }
                     self.recorder?.pause()
                     self.isPaused = true
-                    self.eventContinuation?.yield(.interruptionBegan)
+                    self.isInterrupted = true
+                    self.eventContinuation?.yield(.recordingStopped)
                 }
             }
         )
@@ -247,9 +385,7 @@ final class AudioRecordingService: NSObject, AudioRecording {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     if self.audioSession.currentRoute.inputs.isEmpty {
-                        self.recorder?.pause()
-                        self.isPaused = true
-                        self.eventContinuation?.yield(.interruptionBegan)
+                        self.handleInterruptionBegan()
                     } else {
                         self.eventContinuation?.yield(
                             .routeChanged(
@@ -261,6 +397,14 @@ final class AudioRecordingService: NSObject, AudioRecording {
                 }
             }
         )
+    }
+
+    private func handleInterruptionBegan() {
+        guard !isPaused else { return }
+        recorder?.pause()
+        isPaused = true
+        isInterrupted = true
+        eventContinuation?.yield(.interruptionBegan)
     }
 }
 

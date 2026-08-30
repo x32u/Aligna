@@ -2,10 +2,27 @@ import SwiftUI
 
 struct TasksView: View {
     @State private var selectedFilter: TaskFilter = .open
-    private let tasks: [ProjectTask]
 
-    init(tasks: [ProjectTask] = SampleData.tasks) {
-        self.tasks = tasks
+    /// Tasks are derived from completed meeting analysis, not stored separately.
+    /// Passing the library keeps the tab live as meetings finish processing.
+    private let library: MeetingLibrary?
+    private let providedTasks: [ProjectTask]?
+
+    init(library: MeetingLibrary) {
+        self.library = library
+        providedTasks = nil
+    }
+
+    /// Explicit task list, for previews and tests.
+    init(tasks: [ProjectTask]) {
+        library = nil
+        providedTasks = tasks
+    }
+
+    private var tasks: [ProjectTask] {
+        if let providedTasks { return providedTasks }
+        guard let library else { return [] }
+        return DashboardProjection.tasks(from: library.meetings)
     }
 
     var body: some View {
@@ -96,7 +113,9 @@ private struct TaskRow: View {
 
                 HStack {
                     Label(
-                        task.dueDate.formatted(date: .abbreviated, time: .omitted),
+                        task.dueDateDescription(
+                            style: .dateTime.month(.abbreviated).day()
+                        ),
                         systemImage: "calendar"
                     )
                     .font(.caption)
@@ -122,12 +141,15 @@ private struct TaskRow: View {
 
     private var accessibilityDescription: String {
         let completion = task.isCompleted ? "Completed" : "Open"
-        return "\(task.title), \(completion), assigned to \(task.assignee), due \(task.dueDate.formatted(date: .long, time: .omitted)), \(task.priority.title) priority"
+        let due = task.dueDateDescription(
+            style: .dateTime.year().month(.wide).day()
+        )
+        return "\(task.title), \(completion), assigned to \(task.assignee), due \(due), \(task.priority.title) priority"
     }
 }
 
 #Preview {
     NavigationStack {
-        TasksView()
+        TasksView(tasks: [])
     }
 }

@@ -11,6 +11,7 @@ struct MeetingDetailView: View {
     @State private var isShowingDeleteConfirmation = false
     @State private var isDeleting = false
     @State private var deletionErrorMessage: String?
+    @State private var titleSaveErrorMessage: String?
 
     let meeting: Meeting
     let library: MeetingLibrary?
@@ -117,6 +118,32 @@ struct MeetingDetailView: View {
                     ?? "Check your connection and try again."
             )
         }
+        .alert(
+            "Couldn’t Save Title",
+            isPresented: titleSaveErrorIsPresented
+        ) {
+            Button("OK") {
+                titleSaveErrorMessage = nil
+            }
+        } message: {
+            Text(
+                titleSaveErrorMessage
+                    ?? "That title couldn’t be saved. Please try again."
+            )
+        }
+        .alert(
+            "Changes Not Saved",
+            isPresented: persistenceWarningIsPresented
+        ) {
+            Button("OK") {
+                library?.clearPersistenceWarning()
+            }
+        } message: {
+            Text(
+                library?.persistenceWarning
+                    ?? "Aligna couldn’t save the latest changes to this iPhone."
+            )
+        }
         .onDisappear {
             player.stop()
         }
@@ -124,6 +151,30 @@ struct MeetingDetailView: View {
 
     private var currentMeeting: Meeting {
         library?.meetings.first(where: { $0.id == meeting.id }) ?? meeting
+    }
+
+    private var titleSaveErrorIsPresented: Binding<Bool> {
+        Binding(
+            get: { titleSaveErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    titleSaveErrorMessage = nil
+                }
+            }
+        )
+    }
+
+    /// Surfaces a failed on-disk write so an unsaved change is never presented
+    /// as saved.
+    private var persistenceWarningIsPresented: Binding<Bool> {
+        Binding(
+            get: { library?.persistenceWarning != nil },
+            set: { isPresented in
+                if !isPresented {
+                    library?.clearPersistenceWarning()
+                }
+            }
+        )
     }
 
     private var deletionErrorIsPresented: Binding<Bool> {
@@ -617,29 +668,73 @@ struct MeetingDetailView: View {
             if !currentMeeting.attributedTranscript.isEmpty {
                 LazyVStack(
                     alignment: .leading,
-                    spacing: AlignaSpacing.medium
+                    spacing: AlignaSpacing.roomy
                 ) {
-                    ForEach(currentMeeting.attributedTranscript) { turn in
+                    if let notice = currentMeeting.speakerAttribution.notice {
+                        Label(notice, systemImage: "waveform.badge.xmark")
+                            .font(.footnote)
+                            .foregroundStyle(AlignaColors.secondaryLabel)
+                            .padding(.top, AlignaSpacing.small)
+                    }
+
+                    ForEach(
+                        Array(
+                            currentMeeting.attributedTranscript.enumerated()
+                        ),
+                        id: \.element.id
+                    ) { index, turn in
+                        // A speaker header is drawn only when the speaker
+                        // actually changes, so continuous speech reads as one
+                        // block instead of a column of repeated names.
+                        let isNewSpeaker = index == 0
+                            || currentMeeting.attributedTranscript[index - 1]
+                                .stableSpeakerKey != turn.stableSpeakerKey
+
                         VStack(
                             alignment: .leading,
                             spacing: AlignaSpacing.extraSmall
                         ) {
-                            HStack(spacing: AlignaSpacing.small) {
-                                speakerLabel(for: turn)
+                            if isNewSpeaker {
+                                HStack(spacing: AlignaSpacing.small) {
+                                    speakerLabel(for: turn)
 
-                                Button(turn.startSeconds.transcriptTimestamp) {
-                                    player.seek(to: turn.startSeconds)
+                                    Button(
+                                        turn.startSeconds.transcriptTimestamp
+                                    ) {
+                                        player.seek(to: turn.startSeconds)
+                                    }
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(
+                                        AlignaColors.tertiaryLabel
+                                    )
                                 }
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(
-                                    AlignaColors.secondaryLabel
-                                )
                             }
 
                             Text(turn.text)
                                 .font(.body)
                                 .foregroundStyle(AlignaColors.label)
+                                .textSelection(.enabled)
+                                .fixedSize(
+                                    horizontal: false,
+                                    vertical: true
+                                )
+                                .frame(
+                                    maxWidth: .infinity,
+                                    alignment: .leading
+                                )
                         }
+                        .padding(
+                            .top,
+                            isNewSpeaker
+                                ? AlignaSpacing.zero
+                                : -AlignaSpacing.compact
+                        )
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(
+                            isNewSpeaker
+                                ? "\(turn.speakerDisplayName), \(turn.text)"
+                                : turn.text
+                        )
                     }
 
                     if let speakerCorrectionMessage {
@@ -693,7 +788,10 @@ struct MeetingDetailView: View {
 
     private var transcriptSectionSubtitle: String? {
         if !currentMeeting.attributedTranscript.isEmpty {
-            return "\(currentMeeting.attributedTranscript.count) speaker turns"
+            let count = currentMeeting.attributedTranscript.count
+            return currentMeeting.speakerAttribution.identifiesSpeakers
+                ? "\(count) speaker turns"
+                : "\(count) sections, speakers not identified"
         }
         return currentMeeting.transcript.isEmpty
             ? nil
@@ -704,7 +802,15 @@ struct MeetingDetailView: View {
     private func speakerLabel(
         for turn: AttributedTranscriptTurn
     ) -> some View {
-        if eligibleParticipants.isEmpty
+        // Correction is offered only when diarization actually distinguished
+        // speakers. Correcting the placeholder cluster would attribute the whole
+        // transcript to one person, which is exactly the false claim this state
+        // exists to prevent.
+        if !currentMeeting.speakerAttribution.identifiesSpeakers {
+            Text(turn.speakerDisplayName)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(AlignaColors.secondaryLabel)
+        } else if eligibleParticipants.isEmpty
             || library == nil
             || dependencies == nil {
             Text(turn.speakerDisplayName)
@@ -839,7 +945,15 @@ struct MeetingDetailView: View {
             status: currentMeeting.processingStatus,
             title: title
         )
-        Task { try? await library.save(updated) }
+        Task {
+            do {
+                try await library.save(updated)
+            } catch {
+                // A rename that failed to save must say so, not appear to work.
+                titleSaveErrorMessage =
+                    "That title couldn’t be saved. Please try again."
+            }
+        }
         isEditingTitle = false
     }
 }

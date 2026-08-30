@@ -30,6 +30,39 @@ enum MeetingFileLocations {
 }
 
 actor LocalMeetingRepository: MeetingRepository, LegacyMeetingMigrating {
+    /// Date coding for the on-disk meeting store.
+    ///
+    /// `.iso8601` truncates to whole seconds, so a saved `Meeting` never
+    /// compared equal to the one that was written — `scheduledAt` lost its
+    /// fractional part on every round trip. Encoding uses `Date`'s native
+    /// representation, which is exact; decoding still accepts the ISO8601
+    /// strings written by earlier builds.
+    nonisolated enum DateCoding {
+        private static let fractionalSeconds = Date.ISO8601FormatStyle(
+            includingFractionalSeconds: true
+        )
+        private static let wholeSeconds = Date.ISO8601FormatStyle(
+            includingFractionalSeconds: false
+        )
+
+        static let encodingStrategy: JSONEncoder.DateEncodingStrategy =
+            .deferredToDate
+
+        static let decodingStrategy: JSONDecoder.DateDecodingStrategy =
+            .custom { decoder in
+                let container = try decoder.singleValueContainer()
+                if let seconds = try? container.decode(Double.self) {
+                    return Date(timeIntervalSinceReferenceDate: seconds)
+                }
+                // Files written before this change store ISO8601 strings.
+                let text = try container.decode(String.self)
+                if let date = try? fractionalSeconds.parse(text) {
+                    return date
+                }
+                return try wholeSeconds.parse(text)
+            }
+    }
+
     private let fileManager = FileManager.default
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -48,11 +81,11 @@ actor LocalMeetingRepository: MeetingRepository, LegacyMeetingMigrating {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = DateCoding.encodingStrategy
         self.encoder = encoder
 
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = DateCoding.decodingStrategy
         self.decoder = decoder
     }
 

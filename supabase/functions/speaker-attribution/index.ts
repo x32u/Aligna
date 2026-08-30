@@ -23,6 +23,8 @@ type AttributionRequest = {
   meeting_id?: string;
   model_version?: string | null;
   skipped?: boolean;
+  speaker_state?: string;
+  failure_reason?: string | null;
   status?: string;
   intervals?: Interval[];
   turns?: Turn[];
@@ -41,6 +43,14 @@ const speakerStatuses = new Set([
   "matching_speakers",
   "merging_transcript",
   "failed",
+]);
+
+// Terminal speaker-attribution states the client may report. Only "attributed"
+// means the stored turns describe speakers the app actually distinguished.
+const speakerStates = new Map<string, string>([
+  ["attributed", "complete"],
+  ["skipped", "skipped"],
+  ["failed", "failed"],
 ]);
 
 const json = (body: unknown, status = 200) =>
@@ -188,22 +198,39 @@ Deno.serve(async (request: Request) => {
     return json({ error: "Could not save transcript speakers" }, 500);
   }
 
+  const resolvedState = speakerStates.get(body.speaker_state ?? "") ??
+    (body.skipped === true ? "skipped" : "complete");
+  const attributed = resolvedState === "complete";
+  const failureReason = cleanText(body.failure_reason, 160);
+
   const { error: updateError } = await admin
     .from("meetings")
     .update({
       diarization_timeline: intervals,
-      speaker_processing_skipped: body.skipped === true,
-      speaker_processing_status: body.skipped === true
-        ? "skipped"
-        : "complete",
-      voice_model_version: body.skipped === true
-        ? null
-        : cleanText(body.model_version, 160),
+      speaker_processing_skipped: !attributed,
+      speaker_processing_status: resolvedState,
+      voice_model_version: attributed
+        ? cleanText(body.model_version, 160)
+        : null,
       processing_status: "merging_transcript",
     })
     .eq("id", meetingID);
   if (updateError) {
     return json({ error: "Could not finish transcript speakers" }, 500);
+  }
+
+  // Failure detail goes to the existing private diagnostics table rather than a
+  // new column on meetings: the UI only needs the state, and reason codes should
+  // not be readable by clients.
+  if (resolvedState === "failed") {
+    await admin.rpc("log_meeting_processing_diagnostic", {
+      p_meeting_id: meetingID,
+      p_stage: "diarizing",
+      p_provider: "FluidAudio",
+      p_model_version: cleanText(body.model_version, 160),
+      p_error_code: failureReason ?? "diarization_failed",
+      p_error_detail: null,
+    });
   }
 
   return json({ success: true, turn_count: turns.length });

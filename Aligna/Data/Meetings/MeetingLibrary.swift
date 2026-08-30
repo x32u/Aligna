@@ -1,6 +1,28 @@
 import Foundation
 import Network
 import Observation
+import OSLog
+
+/// Diagnostics for local meeting persistence.
+///
+/// Records only the pipeline stage and a coarse error identity — never meeting
+/// titles, transcripts, or identifiers.
+nonisolated enum MeetingLibraryDiagnostics {
+    private static let logger = Logger(
+        subsystem: "dev.notjc.Aligna",
+        category: "MeetingPersistence"
+    )
+
+    static func logPersistenceFailure(stage: String, error: Error) {
+        logger.error(
+            """
+            Meeting persistence failed. \
+            stage=\(stage, privacy: .public) \
+            type=\(String(reflecting: type(of: error)), privacy: .public)
+            """
+        )
+    }
+}
 
 @MainActor
 @Observable
@@ -8,6 +30,10 @@ final class MeetingLibrary {
     private(set) var meetings: [Meeting]
     private(set) var loadError: MeetingCaptureError?
     private(set) var processingIssues: [UUID: MeetingProcessingIssue] = [:]
+    /// Set when a processing update could not be written to disk. The in-memory
+    /// list still reflects the update, but it will not survive a relaunch — so
+    /// the UI must be able to say so rather than appear to have saved.
+    private(set) var persistenceWarning: String?
 
     let repository: any MeetingRepository
     private let seedMeetings: [Meeting]
@@ -22,12 +48,11 @@ final class MeetingLibrary {
 
     init(
         repository: any MeetingRepository,
-        seedMeetings: [Meeting]? = nil
+        seedMeetings: [Meeting] = []
     ) {
         self.repository = repository
-        let initialMeetings = seedMeetings ?? SampleData.meetings
-        self.seedMeetings = initialMeetings
-        self.meetings = initialMeetings
+        self.seedMeetings = seedMeetings
+        meetings = seedMeetings
     }
 
     func load() async {
@@ -164,10 +189,12 @@ final class MeetingLibrary {
                     self.processingIssues[meeting.id] = failure.issue
                     if failure.shouldRemainQueued {
                         let queued = meeting.withProcessing(status: .queued)
-                        let persisted =
-                            (try? await self.repository.save(queued))
-                            ?? queued
-                        self.merge([persisted])
+                        self.merge([
+                            await self.persist(
+                                queued,
+                                stage: "requeue_after_upload_failure"
+                            ),
+                        ])
                     } else {
                         self.persistProcessingFailure(for: meeting)
                     }
@@ -189,11 +216,15 @@ final class MeetingLibrary {
                     title: snapshot.title,
                     analysis: snapshot.analysis,
                     transcript: snapshot.transcript,
-                    attributedTranscript: snapshot.attributedTranscript
+                    attributedTranscript: snapshot.attributedTranscript,
+                    speakerAttribution: snapshot.speakerAttribution
                 )
-                let persisted = (try? await self.repository.save(updated))
-                    ?? updated
-                self.merge([persisted])
+                self.merge([
+                    await self.persist(
+                        updated,
+                        stage: "processing_snapshot"
+                    ),
+                ])
                 if !snapshot.status.isProcessing {
                     if snapshot.status == .complete {
                         self.processingIssues[meeting.id] = nil
@@ -205,13 +236,43 @@ final class MeetingLibrary {
         }
     }
 
+    /// Writes a meeting to the repository, surfacing a failure instead of
+    /// discarding it.
+    ///
+    /// The previous `try?` made a failed write indistinguishable from a
+    /// successful one: the UI updated either way and the meeting silently
+    /// reverted on relaunch. The in-memory value is still returned so processing
+    /// continues, but `persistenceWarning` records that it is unsaved.
+    private func persist(
+        _ meeting: Meeting,
+        stage: String
+    ) async -> Meeting {
+        do {
+            let saved = try await repository.save(meeting)
+            return saved
+        } catch {
+            MeetingLibraryDiagnostics.logPersistenceFailure(
+                stage: stage,
+                error: error
+            )
+            persistenceWarning =
+                "Aligna couldn’t save the latest changes to this iPhone. Your recording is safe, but reopening the app may show older details."
+            return meeting
+        }
+    }
+
+    func clearPersistenceWarning() {
+        persistenceWarning = nil
+    }
+
     private func persistProcessingFailure(for meeting: Meeting) {
         let failed = meeting.withProcessing(status: .failed)
         merge([failed])
         Task { [weak self] in
             guard let self else { return }
-            let persisted = (try? await repository.save(failed)) ?? failed
-            merge([persisted])
+            merge([
+                await persist(failed, stage: "processing_failure"),
+            ])
         }
     }
 

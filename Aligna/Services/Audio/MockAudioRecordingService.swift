@@ -5,10 +5,18 @@ import Foundation
 final class MockAudioRecordingService: AudioRecording {
     var permissionGranted = true
     var startError: MeetingCaptureError?
+    /// Thrown by `resume()`, simulating a session that will not re-activate.
+    var resumeError: MeetingCaptureError?
+    /// When true, `resume()` succeeds but the recorder stays stopped — the
+    /// real-device failure where `record()` reports success and captures
+    /// nothing.
+    var resumeSilentlyFails = false
     private(set) var cancelCount = 0
     private(set) var requestCount = 0
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    private(set) var pauseCount = 0
+    private(set) var resumeCount = 0
     private(set) var latestFileURL: URL?
 
     private let fileManager: FileManager
@@ -17,9 +25,32 @@ final class MockAudioRecordingService: AudioRecording {
     private var eventContinuation: AsyncStream<AudioRecordingEvent>.Continuation?
     private var levelTask: Task<Void, Never>?
     private var isPaused = false
+    private var isCapturing = false
+
+    var isActivelyRecording: Bool {
+        isCapturing && !isPaused
+    }
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
+    }
+
+    /// Simulates the system taking the audio session away.
+    func simulateInterruptionBegan() {
+        isPaused = true
+        eventContinuation?.yield(.interruptionBegan)
+    }
+
+    /// Simulates the system returning the audio session.
+    func simulateInterruptionEnded(canResume: Bool) {
+        eventContinuation?.yield(.interruptionEnded(canResume: canResume))
+    }
+
+    /// Simulates a media-services reset invalidating the recorder.
+    func simulateRecordingStopped() {
+        isPaused = true
+        isCapturing = false
+        eventContinuation?.yield(.recordingStopped)
     }
 
     func requestPermission() async -> Bool {
@@ -45,6 +76,8 @@ final class MockAudioRecordingService: AudioRecording {
         try createSilentRecording(at: url)
         fileURL = url
         latestFileURL = url
+        isCapturing = true
+        isPaused = false
 
         let samples = AsyncThrowingStream<AudioSample, Error> { continuation in
             sampleContinuation = continuation
@@ -75,11 +108,21 @@ final class MockAudioRecordingService: AudioRecording {
     }
 
     func pause() throws {
+        pauseCount += 1
         isPaused = true
     }
 
     func resume() async throws {
+        resumeCount += 1
+        if let resumeError {
+            throw resumeError
+        }
+        // `resumeSilentlyFails` leaves the recorder stopped even though the call
+        // returned successfully.
         isPaused = false
+        if resumeSilentlyFails {
+            isCapturing = false
+        }
     }
 
     func stop() async throws -> URL {
@@ -87,12 +130,14 @@ final class MockAudioRecordingService: AudioRecording {
         guard let fileURL else {
             throw MeetingCaptureError.invalidAction
         }
+        isCapturing = false
         finishStreams()
         return fileURL
     }
 
     func cancel() async {
         cancelCount += 1
+        isCapturing = false
         finishStreams()
         if let fileURL {
             try? fileManager.removeItem(at: fileURL)
